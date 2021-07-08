@@ -71,7 +71,5 @@ def Discriminator_unlabeled_loss(uncertainty, pred):
     label_state = torch.zeros_like(pred)
 
     loss = criterion(pred, label_state) + torch.mean(uncertainty)
-    a = criterion(pred, label_state)
-    b = torch.mean(uncertainty)
 
     return loss
