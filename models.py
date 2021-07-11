@@ -29,7 +29,7 @@ class OUI(nn.Module):
 
         # Define target classifier model
         self.classifier = nn.Sequential(
-            nn.Conv2d(3, 6, 5),             # B, 6, 32, 32
+            nn.Conv2d(channelNum, 6, 5),             # B, 6, 32, 32
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
             nn.Conv2d(6, 16, 5),            # B, 16, 28, 28
@@ -40,7 +40,7 @@ class OUI(nn.Module):
             nn.ReLU(True),
             nn.Linear(120, 84),             # B, 84
             nn.ReLU(True),
-            nn.Linear(84, 10),              # B, 10
+            nn.Linear(84, classNum),              # B, 10; for CIFAR10, classNum is 10
         )
 
     def forward(self, x):
@@ -78,18 +78,17 @@ class OUI(nn.Module):
         return uncertainty  # return the overall uncertainty of every unlabeled data point
 
 
-
-# Supervised target learner
-class STI(nn.Module):
+# Generator, including STI and UIR
+class Generator(nn.Module):
     def __init__(self, channelNum=3, featureDim=32 * 20 * 20, zDim=256, classNum=10, ngpu=0):
-        super(STI, self).__init__()
-
+        super(Generator, self).__init__()
         self.ngpu = ngpu
         self.channelNum = channelNum
         self.zDim = zDim
-        self.featureDim = featureDim    # TODO: need to tune feature dimension
+        self.featureDim = featureDim            # TODO: may not be using
+        self.classNum = classNum                # TODO: may not be using
 
-        self.encoder = nn.Sequential(
+        self.cnn = nn.Sequential(
             nn.Conv2d(channelNum, 128, 4, 2, 1, bias=False),  # B,  128, 32, 32; stride=2, each side decrease by 4
             nn.BatchNorm2d(128),
             nn.ReLU(True),
@@ -108,71 +107,20 @@ class STI(nn.Module):
         self.fc_mu = nn.Linear(1024 * 2 * 2, zDim)  # B, z_dim
         self.fc_logvar = nn.Linear(1024 * 2 * 2, zDim)  # B, z_dim
 
-        # Decode is a classifier for classification, on CIFAR10 dataset
-        self.decoder = nn.Sequential(
-            nn.Linear(zDim, 1024 * 4 * 4),             # B, 1024*8*8
-            View((-1, 1024, 4, 4)),                    # B, 1024,  8,  8
-            nn.Flatten(),                              # Flatten all dimension except batch
-            nn.Linear(1024 * 4 * 4, 120),              # TODO: tune layer dimension
+        # STI decoder is a classifier for classification, on CIFAR10 dataset
+        self.sti = nn.Sequential(
+            nn.Linear(zDim, 1024 * 4 * 4),  # B, 1024*8*8
+            View((-1, 1024, 4, 4)),  # B, 1024,  8,  8
+            nn.Flatten(),  # Flatten all dimension except batch
+            nn.Linear(1024 * 4 * 4, 120),   # TODO: tune layer dimension
             nn.ReLU(True),
             nn.Linear(120, 84),
             nn.ReLU(True),
-            nn.Linear(84, classNum),                   # For CIFAR10, classNum is 10
+            nn.Linear(84, classNum),        # For CIFAR10, classNum is 10
         )
 
-
-    def reparameterize(self, mu, logvar):
-        stds = (0.5 * logvar).exp()
-        epsilon = torch.randn(*mu.size())
-        if mu.is_cuda:
-            stds, epsilon = stds.cuda(), epsilon.cuda()
-        latents = epsilon * stds + mu
-        return latents
-
-    def forward(self, x):
-        z = self._encode(x)
-        mu, logvar = self.fc_mu(z), self.fc_logvar(z)
-        z = self.reparameterize(mu, logvar)          # latent variables, rich representation
-        pred = self._decode(z)                    # decoder output predictions
-
-        return pred, z, mu, logvar
-
-    def _encode(self, x):
-        return self.encoder(x)
-
-    def _decode(self, z):
-        return self.decoder(z)
-
-
-# Unsupervised image reconstructor, standard VAE
-class UIR(nn.Module):
-    def __init__(self, channelNum=3, zDim=256, ngpu=0):
-        super(UIR, self).__init__()
-
-        self.ngpu = ngpu
-        self.channelNum = channelNum
-        self.zDim = zDim
-
-        self.encoder = nn.Sequential(
-            nn.Conv2d(channelNum, 128, 4, 2, 1, bias=False),  # B,  128, 32, 32
-            nn.BatchNorm2d(128),
-            nn.ReLU(True),
-            nn.Conv2d(128, 256, 4, 2, 1, bias=False),  # B,  256, 16, 16
-            nn.BatchNorm2d(256),
-            nn.ReLU(True),
-            nn.Conv2d(256, 512, 4, 2, 1, bias=False),  # B,  512,  8,  8
-            nn.BatchNorm2d(512),
-            nn.ReLU(True),
-            nn.Conv2d(512, 1024, 4, 2, 1, bias=False),  # B, 1024,  4,  4
-            nn.BatchNorm2d(1024),
-            nn.ReLU(True),
-            View((-1, 1024 * 2 * 2)),  # B, 1024*4*4
-        )
-
-        self.fc_mu = nn.Linear(1024 * 2 * 2, zDim)  # B, z_dim
-        self.fc_logvar = nn.Linear(1024 * 2 * 2, zDim)  # B, z_dim
-
-        self.decoder = nn.Sequential(
+        # UIR decoder reconstruct image from latent variables
+        self.uir = nn.Sequential(
             nn.Linear(zDim, 1024 * 4 * 4),  # B, 1024*8*8
             View((-1, 1024, 4, 4)),  # B, 1024,  8,  8
             nn.ConvTranspose2d(1024, 512, 4, 2, 1, bias=False),  # B,  512, 16, 16
@@ -187,7 +135,6 @@ class UIR(nn.Module):
             nn.ConvTranspose2d(128, channelNum, 1),  # B,   nc, 64, 64
         )
 
-
     def reparameterize(self, mu, logvar):
         stds = (0.5 * logvar).exp()
         epsilon = torch.randn(*mu.size())
@@ -197,17 +144,15 @@ class UIR(nn.Module):
         return latents
 
     def forward(self, x):
-        z = self._encode(x)                                 # x: 128, 3, 32, 32
+        z = self.cnn(x)
         mu, logvar = self.fc_mu(z), self.fc_logvar(z)
-        z = self.reparameterize(mu, logvar)                 # latent variables, rich representation
-        x_recon = self._decode(z)
-        return x_recon, z, mu, logvar
+        z = self.reparameterize(mu, logvar)     # latent variables, rich representation
+        pred = self.sti(z)                      # STI output predictions
+        recon = self.uir(z)                     # UIR output reconstructions
+        return pred, recon, z, mu, logvar
 
-    def _encode(self, x):
-        return self.encoder(x)
 
-    def _decode(self, z):
-        return self.decoder(z)
+
 
 
 
