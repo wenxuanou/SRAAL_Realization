@@ -26,37 +26,26 @@ def cifar_transformer():
                                 std=[0.5, 0.5, 0.5]),
         ])
 
-def loadData(DatasetName, data_path, batch_size, num_train):
-    if DatasetName == 'cifar10':
-        testset = datasets.CIFAR10(data_path, download=True,
-                                   transform=cifar_transformer(), train=False)
+def loadData(data_path, batch_size, num_train):
+    # Load CIFAR10
 
-        test_loader = data.DataLoader(testset, batch_size=batch_size,
-                                     shuffle = True, num_workers = 2, drop_last=False)
+    testset = datasets.CIFAR10(data_path, download=True,
+                               transform=cifar_transformer(), train=False)
 
-        trainset = datasets.CIFAR10(data_path, download=True,
+    test_loader = data.DataLoader(testset, batch_size=batch_size,
+                                 shuffle = True, num_workers = 2, drop_last=False)
+
+    trainset = datasets.CIFAR10(data_path, download=True,
+                               transform=cifar_transformer(), train=True)
+
+    trainset_unlabeled = datasets.CIFAR10(data_path, download=True,
                                    transform=cifar_transformer(), train=True)
 
-        trainset_unlabeled = datasets.CIFAR10(data_path, download=True,
-                                   transform=cifar_transformer(), train=True)
-
-    elif DatasetName == 'cifar100':
-        testset = datasets.CIFAR100(data_path, download=True,
-                                   transform=cifar_transformer(), train=False)
-
-        test_loader = data.DataLoader(testset, batch_size=batch_size,
-                                     shuffle=True, num_workers=2, drop_last=False)
-
-        trainset = datasets.CIFAR100(data_path, download=True,
-                                    transform=cifar_transformer(), train=True)
-
-        trainset_unlabeled = datasets.CIFAR100(data_path, download=True,
-                                              transform=cifar_transformer(), train=True)
 
     # Select initial uunlabeled set from trainset
-    indices = list(range(num_train))
+    indices = list(range(num_train))            # number of training samples
     random.shuffle(indices)
-    unlabeled_set = indices      # indices for unlabeled data
+    unlabeled_set = indices                     # indices for unlabeled data
 
 
     return testset, test_loader, trainset, trainset_unlabeled, unlabeled_set
@@ -77,7 +66,7 @@ def labeledSetInit(unlabeled_set, M):
 
 ############################################
 # Main
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("Program start")
 
     # Random Seed
@@ -85,14 +74,13 @@ if __name__ == '__main__':
     torch.manual_seed(999)
 
     # Parameters
-    DatasetName = 'cifar10'     # name of dataset, use CIFAR10 or CIFAR100
-    DataPath = './data'         # dataset directory
-    OutPath = './results'       # output log directory
-    LogName = 'accuracies.log'  # save final model performance
+    DataPath = "./data"         # dataset directory
+    OutPath = "./results"       # output log directory
+    LogName = "accuracies.log"  # save final model performance
     BatchSize = 128             # batch size for training and testing
     NUM_TRAIN = 50000           # CIFAR10 training set has 50000 samples
     # Epochs = 100                # training epochs
-    Epochs = 50
+    Epochs = 100
     ZDim = 32                   # VAE latent dimension
     Beta = 1                    # VAE hyperparameter
     M = 2000                    # initial labeled set size
@@ -106,8 +94,7 @@ if __name__ == '__main__':
 
     # Load data
     print("Load data")
-    testset, test_loader, trainset, trainset_unlabeled, unlabeled_set = loadData(DatasetName, DataPath,
-                                                                                 BatchSize, NUM_TRAIN)
+    testset, test_loader, trainset, trainset_unlabeled, unlabeled_set = loadData(DataPath, BatchSize, NUM_TRAIN)
     print("Data Loaded")
 
     # Labeled set initialization
@@ -130,6 +117,12 @@ if __name__ == '__main__':
     optim_oui = optim.Adam(oui.parameters(), lr=5e-4)                              # Adam converges faster than SGD
     optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
 
+
+    # Tracking training loss
+    oui_train_loss_record = [0]
+    uir_train_loss_record = [0]
+    sti_train_loss_record = [0]
+    discriminator_train_loss_record = [0]
 
     # Start training
     # For each epoch
@@ -189,6 +182,13 @@ if __name__ == '__main__':
                 print("OUI Loss: " + str(oui_train_loss / (len(train_labeled_loader)/4))
                       + " UIR Loss: " + str(uir_train_loss / (len(train_labeled_loader)/4))
                       + " STI Loss: " + str(sti_train_loss / (len(train_labeled_loader)/4)) )
+
+                # record loss
+                oui_train_loss_record.append(oui_train_loss / (len(train_labeled_loader)/4))
+                uir_train_loss_record.append(uir_train_loss / (len(train_labeled_loader)/4))
+                sti_train_loss_record.append(sti_train_loss / (len(train_labeled_loader)/4))
+                discriminator_train_loss_record.append(discriminator_train_loss_record[-1])   # No new values for discriminator loss
+
                 oui_train_loss = 0.0
                 uir_train_loss = 0.0
                 sti_train_loss = 0.0
@@ -233,6 +233,13 @@ if __name__ == '__main__':
                       "  Unlabeled Batch:" + str(i) + " / " + str(len(train_unlabeled_loader)))
                 print("UIR Loss: " + str(uir_train_loss / (len(train_unlabeled_loader) / 10))
                       + " Discriminator Loss: " + str(discriminator_train_loss / (len(train_unlabeled_loader) / 10)))
+
+                # record loss
+                oui_train_loss_record.append(oui_train_loss_record[-1])
+                uir_train_loss_record.append(uir_train_loss / (len(train_unlabeled_loader) / 10))
+                sti_train_loss_record.append(sti_train_loss_record[-1])
+                discriminator_train_loss_record.append(discriminator_train_loss / (len(train_unlabeled_loader) / 10))
+
                 uir_train_loss = 0.0
                 discriminator_train_loss = 0.0
 
@@ -247,7 +254,7 @@ if __name__ == '__main__':
             # Access data sequentially, track indices
             relabeling_set = [[], []]
             for i, data_sample in enumerate(relabeling_loader, 0):
-                print("Unlabeled pool: " + str(i) + " / " + str(len(relabeling_loader)))
+                # print("Unlabeled pool: " + str(i) + " / " + str(len(relabeling_loader)))
 
                 inputs, _ = data_sample  # will not use labels, regarded as unlabeled data
                 inputs = inputs.to(device)
@@ -278,15 +285,25 @@ if __name__ == '__main__':
                     relabeling_set[1] = relabeling_set[1][:RelabelNum]
                 i += relabeling_loader.batch_size
 
-            # TODO: check size of relabeling_set
             # Update labeled and unlabeled set, reload dataloader
-            relabeling_set = [int(e) for e in relabeling_set[0]]                        # make sure all integer
+            relabeling_set = [int(e) for e in relabeling_set[0]]                        # convert to integer
             labeled_set += relabeling_set                                               # move to labeled set
             unlabeled_set = [e for e in unlabeled_set if e not in relabeling_set]       # remove from unlabeled set
 
 
     # Save model
     print("Save model")
-    torch.save(oui.state_dict(), "oui_state_dict")
-    torch.save(generator.state_dict(), "generator_state_dict")
-    torch.save(discriminator.state_dict(), "discriminator_state_dict")
+    torch.save(oui.state_dict(), "oui_state_dict.pt")
+    torch.save(generator.state_dict(), "generator_state_dict.pt")
+    torch.save(discriminator.state_dict(), "discriminator_state_dict.pt")
+
+    # Save loss values
+    oui_train_loss_record = np.array(oui_train_loss_record)
+    uir_train_loss_record = np.array(uir_train_loss_record)
+    sti_train_loss_record = np.array(sti_train_loss_record)
+    discriminator_train_loss_record = np.array(discriminator_train_loss_record)
+
+    np.savetxt('oui_train_loss.out', oui_train_loss_record, delimiter=',')
+    np.savetxt('uir_train_loss.out', uir_train_loss_record, delimiter=',')
+    np.savetxt('sti_train_loss.out', sti_train_loss_record, delimiter=',')
+    np.savetxt('discriminator_train_loss.out', discriminator_train_loss_record, delimiter=',')
