@@ -63,13 +63,12 @@ def UIR_loss(mu, logVar, recons, imgs):
 # TODO: find a way to merge these two functions
 def Discriminator_labeled_loss(pred):
     criterion = nn.BCELoss()
-    loss = criterion(pred, torch.zeros_like(pred))
+    loss = criterion(pred, torch.ones_like(pred))      # Ground truth for labeled samples is one
     return loss
 
 def Discriminator_unlabeled_loss(uncertainty, pred):
     criterion = nn.BCELoss()
-    label_state = torch.zeros_like(pred)
-
+    label_state = torch.zeros_like(pred)                # Ground truth for unlabeled samples is zero
     loss = criterion(pred, label_state) + torch.mean(uncertainty)
 
     return loss

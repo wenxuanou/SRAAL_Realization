@@ -1,10 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-ouiLossPath = "oui_train_loss.out"
-stiLossPath = "sti_train_loss.out"
-uirLossPath = "uir_train_loss.out"
-discriminatorLossPath = "discriminator_train_loss.out"
+ouiLossPath = "results/oui_train_loss.out"
+stiLossPath = "results/sti_train_loss.out"
+uirLossPath = "results/uir_train_loss.out"
+discriminatorLossPath = "results/discriminator_train_loss.out"
 
 ouiLoss = np.loadtxt(ouiLossPath, delimiter=',')
 stiLoss = np.loadtxt(stiLossPath, delimiter=',')

@@ -48,7 +48,7 @@ def loadData(data_path, batch_size, num_train):
     unlabeled_set = indices                     # indices for unlabeled data
 
 
-    return testset, test_loader, trainset, trainset_unlabeled, unlabeled_set
+    return test_loader, trainset, trainset_unlabeled, unlabeled_set
 
 def labeledSetInit(unlabeled_set, M):
     # I = 10                  # I << M, M: labeled set size
@@ -80,7 +80,7 @@ if __name__ == "__main__":
     BatchSize = 128             # batch size for training and testing
     NUM_TRAIN = 50000           # CIFAR10 training set has 50000 samples
     # Epochs = 100                # training epochs
-    Epochs = 100
+    Epochs = 500
     ZDim = 32                   # VAE latent dimension
     Beta = 1                    # VAE hyperparameter
     M = 2000                    # initial labeled set size
@@ -94,7 +94,7 @@ if __name__ == "__main__":
 
     # Load data
     print("Load data")
-    testset, test_loader, trainset, trainset_unlabeled, unlabeled_set = loadData(DataPath, BatchSize, NUM_TRAIN)
+    test_loader, trainset, trainset_unlabeled, unlabeled_set = loadData(DataPath, BatchSize, NUM_TRAIN)
     print("Data Loaded")
 
     # Labeled set initialization
@@ -103,6 +103,7 @@ if __name__ == "__main__":
     labeled_set, unlabeled_set = labeledSetInit(unlabeled_set, M)
 
     # Initialize network
+    # TODO: set to training mode before training
     generator = Generator(channelNum=3, zDim=ZDim, classNum=ClassNum, ngpu=1).to(device)
     oui = OUI(channelNum=3, classNum=ClassNum, ngpu=1).to(device)           # OUI trains the target model
     discriminator = StateDiscriminator(ZDim).to(device)
@@ -113,8 +114,8 @@ if __name__ == "__main__":
 
     # Initialize optimizer
     optim_generator = optim.Adam(generator.parameters(), lr=5e-4)
-    # optim_oui = optim.SGD(oui.parameters(), lr=0.001, momentum=0.9)              # Use SGD for target classifier
-    optim_oui = optim.Adam(oui.parameters(), lr=5e-4)                              # Adam converges faster than SGD
+    optim_oui = optim.SGD(oui.parameters(), lr=0.01, weight_decay=5e-4, momentum=0.9)   # Use SGD for target classifier
+    # optim_oui = optim.Adam(oui.parameters(), lr=5e-4)                                 # Adam converges faster than SGD
     optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
 
 
@@ -123,6 +124,8 @@ if __name__ == "__main__":
     uir_train_loss_record = [0]
     sti_train_loss_record = [0]
     discriminator_train_loss_record = [0]
+    # Test loss
+    test_loss_record = [0]
 
     # Start training
     # For each epoch
@@ -169,13 +172,14 @@ if __name__ == "__main__":
             # train discriminator
             z = z.detach()                                                      # no need to track gradient for z
             pred_discriminator = discriminator.forward(z)                       # discriminator tells whether data is labeled/unlabeled
-            discriminator_loss = Discriminator_labeled_loss(pred_discriminator) # TODO: find better discriminator loss computation
-            discriminator_loss.backward()                                       # TODO: fix backward problem
+            discriminator_loss = Discriminator_labeled_loss(pred_discriminator) # ground truth for labeled sample is one
+            discriminator_loss.backward()
             optim_discriminator.step()
 
             oui_train_loss += oui_loss.item()
             uir_train_loss += uir_loss.item()
             sti_train_loss += sti_loss.item()
+            # record 4 loss every minibatch
             if i % (len(train_labeled_loader)/4) == (len(train_labeled_loader)/4) - 1:
                 print("Epoch: " + str(epoch) + " / " + str(Epochs) +
                       "  Labeled Batch:" + str(i) + " / " + str(len(train_labeled_loader)))
@@ -222,17 +226,18 @@ if __name__ == "__main__":
             uncertainty = uncertainty.detach()                            # no need to track gradient for uncertainty
 
             pred_discriminator = discriminator.forward(z)  # TODO: check sign
-            discriminator_loss = Discriminator_unlabeled_loss(uncertainty, pred_discriminator)      # TODO: fix negative problem
+            discriminator_loss = Discriminator_unlabeled_loss(uncertainty, pred_discriminator) # ground truth for labeled sample is zero
             discriminator_loss.backward()
             optim_discriminator.step()
 
             uir_train_loss += uir_loss.item()
             discriminator_train_loss += discriminator_loss.item()
-            if i % (len(train_unlabeled_loader) / 10) == (len(train_unlabeled_loader) / 10) - 1:
+            # record 4 loss every minibatch
+            if i % (len(train_unlabeled_loader) / 4) == (len(train_unlabeled_loader) / 4) - 1:
                 print("Epoch: " + str(epoch) + " / " + str(Epochs) +
                       "  Unlabeled Batch:" + str(i) + " / " + str(len(train_unlabeled_loader)))
-                print("UIR Loss: " + str(uir_train_loss / (len(train_unlabeled_loader) / 10))
-                      + " Discriminator Loss: " + str(discriminator_train_loss / (len(train_unlabeled_loader) / 10)))
+                print("UIR Loss: " + str(uir_train_loss / (len(train_unlabeled_loader) / 4))
+                      + " Discriminator Loss: " + str(discriminator_train_loss / (len(train_unlabeled_loader) / 4)))
 
                 # record loss
                 oui_train_loss_record.append(oui_train_loss_record[-1])
@@ -291,19 +296,45 @@ if __name__ == "__main__":
             unlabeled_set = [e for e in unlabeled_set if e not in relabeling_set]       # remove from unlabeled set
 
 
+        # Test target model (OUI)
+        # TODO: set to evaluation mode before testing
+        correct = 0
+        total = 0
+        # Stop tracking gradient
+        with torch.no_grad():
+            for test_sample in test_loader:
+                test_inputs, test_labels = test_sample
+                test_inputs = test_inputs.to(device)
+                test_labels = test_labels.to(device)
+
+                pred_test = oui.forward(test_inputs)
+
+                _, predicted = torch.max(pred_test.data, 1)
+                total += test_labels.size(0)
+                correct += (predicted == test_labels).sum().item()
+
+        test_loss_record.append((1 - correct / total))
+        print("Accuracy of the network on the 10000 test images: %d %%" % (
+                100 * correct / total))
+
+
+
     # Save model
     print("Save model")
-    torch.save(oui.state_dict(), "oui_state_dict.pt")
-    torch.save(generator.state_dict(), "generator_state_dict.pt")
-    torch.save(discriminator.state_dict(), "discriminator_state_dict.pt")
+    torch.save(oui.state_dict(), "results/oui_state_dict.pt")
+    torch.save(generator.state_dict(), "results/generator_state_dict.pt")
+    torch.save(discriminator.state_dict(), "results/discriminator_state_dict.pt")
 
     # Save loss values
+    print("Save loss record")
     oui_train_loss_record = np.array(oui_train_loss_record)
     uir_train_loss_record = np.array(uir_train_loss_record)
     sti_train_loss_record = np.array(sti_train_loss_record)
     discriminator_train_loss_record = np.array(discriminator_train_loss_record)
+    test_loss_record = np.array(test_loss_record)
 
-    np.savetxt('oui_train_loss.out', oui_train_loss_record, delimiter=',')
-    np.savetxt('uir_train_loss.out', uir_train_loss_record, delimiter=',')
-    np.savetxt('sti_train_loss.out', sti_train_loss_record, delimiter=',')
-    np.savetxt('discriminator_train_loss.out', discriminator_train_loss_record, delimiter=',')
+    np.savetxt("results/oui_train_loss.out", oui_train_loss_record, delimiter=",")
+    np.savetxt("results/uir_train_loss.out", uir_train_loss_record, delimiter=",")
+    np.savetxt("results/sti_train_loss.out", sti_train_loss_record, delimiter=",")
+    np.savetxt("results/discriminator_train_loss.out", discriminator_train_loss_record, delimiter=",")
+    np.savetxt("results/test_loss.out", test_loss_record, delimiter=",")
