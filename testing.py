@@ -31,7 +31,7 @@ def loadCIFAR10(data_path, batch_size):
 if __name__ == "__main__":
     DataPath = "./data"         # dataset directory
     BatchSize = 4             # batch size for training and testing
-    ModelPath = "oui_state_dict_50epoch.pt"
+    ModelPath = "results/oui_state_dict.pt"
     ClassNum = 10               # 10 classes in CIFAR10
 
     # Load data

@@ -74,18 +74,19 @@ if __name__ == "__main__":
     torch.manual_seed(999)
 
     # Parameters
-    DataPath = "./data"         # dataset directory
-    OutPath = "./results"       # output log directory
-    LogName = "accuracies.log"  # save final model performance
-    BatchSize = 128             # batch size for training and testing
-    NUM_TRAIN = 50000           # CIFAR10 training set has 50000 samples
-    # Epochs = 100                # training epochs
-    Epochs = 500
-    ZDim = 32                   # VAE latent dimension
-    Beta = 1                    # VAE hyperparameter
-    M = 2000                    # initial labeled set size
-    ClassNum = 10               # CIFAR10: 10; CIFAR100: 100
-    RelabelNum = 500            # number of samples to move to labeled set each epoch
+    DataPath = "./data"                             # dataset directory
+    OutPath = "./results"                           # output log directory
+    LogName = "accuracies.log"                      # save final model performance
+    BatchSize = 128                                 # batch size for training and testing
+    NUM_TRAIN = 50000                               # CIFAR10 training set has 50000 samples in total
+    # Epochs = 100                                  # training epochs
+    Epochs = 100
+    ZDim = 32                                       # VAE latent dimension
+    Beta = 1                                        # VAE hyperparameter
+    M = NUM_TRAIN * 0.1                             # initial labeled set size (the paper selects 10% of the entire set)
+    ClassNum = 10                                   # CIFAR10: 10; CIFAR100: 100
+
+    RelabelNum = NUM_TRAIN * 0.9 * 0.05             # number of samples to relabel each epoch (paper uses 5% of the unlabeled set, dynamically)
 
     # Device available
     ngpu = 1    # number of gpu available
@@ -100,7 +101,7 @@ if __name__ == "__main__":
     # Labeled set initialization
     # CIFAT10 comes with label, randomly select a few for labeled set and put the rest in unlabeled set
     print("Initializing labeled set")
-    labeled_set, unlabeled_set = labeledSetInit(unlabeled_set, M)
+    labeled_set, unlabeled_set = labeledSetInit(unlabeled_set, int(M))
 
     # Initialize network
     # TODO: set to training mode before training
@@ -198,7 +199,7 @@ if __name__ == "__main__":
                 sti_train_loss = 0.0
 
 
-        # For each batch, with unlabeled data
+        # Train with unlabeled data
         uir_train_loss = 0.0
         discriminator_train_loss = 0.0
         for i, data_sample in enumerate(train_unlabeled_loader, 0):
@@ -250,8 +251,8 @@ if __name__ == "__main__":
 
 
 
-        # Relabeling, every 10 epoch
-        if epoch % 10 == 9:
+        # Relabeling, every epoch
+        if len(labeled_set) <= 0.4 * NUM_TRAIN:             # Relabel until labeled set reaches 40% of total samples
             print("Relabeling")
             relabeling_loader = data.DataLoader(trainset_unlabeled, batch_size=BatchSize,
                                                 sampler=sampler.SequentialSampler(unlabeled_set), pin_memory=True)
@@ -286,14 +287,17 @@ if __name__ == "__main__":
 
                 # keep top uncertainty data to relabel
                 if len(relabeling_set[0]) > RelabelNum:
-                    relabeling_set[0] = relabeling_set[0][:RelabelNum]
-                    relabeling_set[1] = relabeling_set[1][:RelabelNum]
+                    relabeling_set[0] = relabeling_set[0][:int(RelabelNum)]
+                    relabeling_set[1] = relabeling_set[1][:int(RelabelNum)]
                 i += relabeling_loader.batch_size
 
             # Update labeled and unlabeled set, reload dataloader
             relabeling_set = [int(e) for e in relabeling_set[0]]                        # convert to integer
             labeled_set += relabeling_set                                               # move to labeled set
             unlabeled_set = [e for e in unlabeled_set if e not in relabeling_set]       # remove from unlabeled set
+
+            # Update number of samples to relabel
+            RelabelNum = len(unlabeled_set) * 0.05
 
 
         # Test target model (OUI)
