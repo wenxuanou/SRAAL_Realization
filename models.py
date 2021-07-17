@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.init as init
+# import torch.nn.init as init
 import torch.cuda
-import torch.backends.cudnn as cudnn
+# import torch.backends.cudnn as cudnn
 
 
 import numpy as np

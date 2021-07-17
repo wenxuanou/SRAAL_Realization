@@ -7,17 +7,13 @@ from torchvision import datasets, transforms
 import torch.utils.data.sampler as sampler
 import torch.utils.data as data
 import torch.optim as optim
-import torch.nn.functional as F
 
 import numpy as np
-import os
 import random
-from operator import itemgetter
 from models import OUI, Generator, StateDiscriminator, weights_init
-from lossFunc import OUI_loss, STI_loss, UIR_loss, Discriminator_labeled_loss, Discriminator_unlabeled_loss
+from lossFunc import OUI_loss, STI_loss, UIR_loss, adversary_loss, discriminator_loss, Discriminator_labeled_loss, Discriminator_unlabeled_loss
+import customDataset
 
-# For debug only
-import matplotlib.pyplot as plt
 
 def cifar_transformer():
     return transforms.Compose([
@@ -26,7 +22,7 @@ def cifar_transformer():
                                 std=[0.5, 0.5, 0.5]),
         ])
 
-def loadData(data_path, batch_size, num_train):
+def loadData(data_path, batch_size):
     # Load CIFAR10
 
     testset = datasets.CIFAR10(data_path, download=True,
@@ -35,33 +31,45 @@ def loadData(data_path, batch_size, num_train):
     test_loader = data.DataLoader(testset, batch_size=batch_size,
                                  shuffle = True, num_workers = 2, drop_last=False)
 
-    trainset = datasets.CIFAR10(data_path, download=True,
-                               transform=cifar_transformer(), train=True)
+    trainset = customDataset.CIFAR10(data_path)     # customized CIFAR10, added sample index info
 
-    trainset_unlabeled = datasets.CIFAR10(data_path, download=True,
-                                   transform=cifar_transformer(), train=True)
+    return test_loader, trainset
 
 
-    # Select initial uunlabeled set from trainset
-    indices = list(range(num_train))            # number of training samples
-    random.shuffle(indices)
-    unlabeled_set = indices                     # indices for unlabeled data
+def labeledSetInit(num_train, M):
+    all_indices = list(range(num_train))        # index for all samples
 
+    # Randomly select labeled data
+    random.shuffle(all_indices)
+    labeled_indices = all_indices[:M]
+    unlabeled_indices = all_indices[M:]
 
-    return test_loader, trainset, trainset_unlabeled, unlabeled_set
+    return labeled_indices, unlabeled_indices
 
-def labeledSetInit(unlabeled_set, M):
-    # I = 10                  # I << M, M: labeled set size
-    I = M
+def updateDataloader(labeled_indices, unlabeled_indices, BatchSize, train_set):
+    labeled_sampler = sampler.SubsetRandomSampler(labeled_indices)
+    labeled_dataloader = data.DataLoader(train_set, sampler=labeled_sampler,
+                                         batch_size=BatchSize,
+                                         drop_last=True)  # labeled dataset, drop out not filed batch
 
-    # Randomly sample data to move from unlabeled to labeled set
-    random.shuffle(unlabeled_set)
-    labeled_set = unlabeled_set[:I]
-    unlabeled_set = unlabeled_set[I:]
+    unlabeled_sampler = sampler.SubsetRandomSampler(unlabeled_indices)
+    unlabeled_dataloader = data.DataLoader(train_set, sampler=unlabeled_sampler,
+                                           batch_size=BatchSize, drop_last=False)
 
-    return labeled_set, unlabeled_set
+    return labeled_dataloader, unlabeled_dataloader
 
-
+def extract_data(dataloader, labels=True):
+    # make dataloader iterable, generator
+    if labels:
+        while True:
+            for data in dataloader:
+                img, label, id = data
+                yield img, label, id
+    else:
+        while True:
+            for data in dataloader:
+                img, _, id = data
+                yield img, id
 
 
 ############################################
@@ -78,15 +86,18 @@ if __name__ == "__main__":
     OutPath = "./results"                           # output log directory
     LogName = "accuracies.log"                      # save final model performance
     BatchSize = 128                                 # batch size for training and testing
-    NUM_TRAIN = 50000                               # CIFAR10 training set has 50000 samples in total
+    ImgNum = 50000                               # CIFAR10 training set has 50000 samples in total
     # Epochs = 100                                  # training epochs
-    Epochs = 100
+    Epochs = 10
     ZDim = 32                                       # VAE latent dimension
     Beta = 1                                        # VAE hyperparameter
-    M = NUM_TRAIN * 0.1                             # initial labeled set size (the paper selects 10% of the entire set)
+    M = ImgNum * 0.1                             # initial labeled set size (the paper selects 10% of the entire set)
     ClassNum = 10                                   # CIFAR10: 10; CIFAR100: 100
+    RelabelNum = ImgNum * 0.9 * 0.05             # number of samples to relabel each epoch (paper uses 5% of the unlabeled set, dynamically)
 
-    RelabelNum = NUM_TRAIN * 0.9 * 0.05             # number of samples to relabel each epoch (paper uses 5% of the unlabeled set, dynamically)
+
+    # Compute actual training iterations per epoch
+    train_iterations = ImgNum // BatchSize
 
     # Device available
     ngpu = 1    # number of gpu available
@@ -95,16 +106,13 @@ if __name__ == "__main__":
 
     # Load data
     print("Load data")
-    test_loader, trainset, trainset_unlabeled, unlabeled_set = loadData(DataPath, BatchSize, NUM_TRAIN)
-    print("Data Loaded")
-
-    # Labeled set initialization
+    test_loader, train_set = loadData(DataPath, BatchSize)
     # CIFAT10 comes with label, randomly select a few for labeled set and put the rest in unlabeled set
     print("Initializing labeled set")
-    labeled_set, unlabeled_set = labeledSetInit(unlabeled_set, int(M))
+    labeled_indices, unlabeled_indices = labeledSetInit(ImgNum, int(M))  # Labeled set index initialization
+
 
     # Initialize network
-    # TODO: set to training mode before training
     generator = Generator(channelNum=3, zDim=ZDim, classNum=ClassNum, ngpu=1).to(device)
     oui = OUI(channelNum=3, classNum=ClassNum, ngpu=1).to(device)           # OUI trains the target model
     discriminator = StateDiscriminator(ZDim).to(device)
@@ -116,192 +124,149 @@ if __name__ == "__main__":
     # Initialize optimizer
     optim_generator = optim.Adam(generator.parameters(), lr=5e-4)
     optim_oui = optim.SGD(oui.parameters(), lr=0.01, weight_decay=5e-4, momentum=0.9)   # Use SGD for target classifier
-    # optim_oui = optim.Adam(oui.parameters(), lr=5e-4)                                 # Adam converges faster than SGD
     optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
 
 
     # Tracking training loss
+    iteration = [0]
     oui_train_loss_record = [0]
-    uir_train_loss_record = [0]
-    sti_train_loss_record = [0]
+    generator_train_loss_record = [0]
     discriminator_train_loss_record = [0]
     # Test loss
-    test_loss_record = [0]
+    test_accuracy = [0]
+
 
     # Start training
-    # For each epoch
+    # TODO: split epoch, relabel each epoch
     print("Training start")
     for epoch in range(Epochs):
-        # Set up training dataloader, will be updated every iteration
-        print("Labeled_set size: " + str(len(labeled_set)) + " Unlabeled_set size: " + str(len(unlabeled_set)))
+        # Update dataloader
+        labeled_dataloader, unlabeled_dataloader = updateDataloader(labeled_indices, unlabeled_indices,
+                                                                    BatchSize, train_set)
+        labeled_data = extract_data(labeled_dataloader)                         # make iterable
+        unlabeled_data = extract_data(unlabeled_dataloader, labels=False)
 
-        train_labeled_loader = data.DataLoader(trainset, batch_size=BatchSize,
-                                               sampler=sampler.SubsetRandomSampler(labeled_set), pin_memory=True)
-        train_unlabeled_loader = data.DataLoader(trainset_unlabeled, batch_size=BatchSize,
-                                                 sampler=sampler.SubsetRandomSampler(unlabeled_set), pin_memory=True)
+        for iter_count in range(train_iterations):
+            labeled_imgs, labels, labeled_batch_id = next(labeled_data)
+            unlabeled_imgs, unlabeled_batch_id = next(unlabeled_data)
 
-        # Train with labeled data
-        oui_train_loss = 0.0
-        uir_train_loss = 0.0
-        sti_train_loss = 0.0
-        for i, data_sample in enumerate(train_labeled_loader, 0):
-
-            inputs, labels = data_sample        # Labels size: batch_size * 1, number as labels, need to decode to 0 and 1
-            inputs = inputs.to(device)
+            labeled_imgs = labeled_imgs.to(device)      # send data to training device
             labels = labels.to(device)
+            unlabeled_imgs = unlabeled_imgs.to(device)
 
-            # set gradient to zero
+
+            # Train OUI (target model)
+            pred_oui = oui.forward(labeled_imgs)
+            oui_loss = OUI_loss(pred_oui, labels)
             optim_oui.zero_grad()
-            optim_generator.zero_grad()
-            optim_discriminator.zero_grad()
-
-            # train OUI(target model), here is a simple classifier
-            pred_oui = oui.forward(inputs)
-            oui_loss = OUI_loss(pred_oui, labels)                       # TODO: check scale
             oui_loss.backward()
             optim_oui.step()
 
-            # train generator
-            pred, recon, z, mu, logvar = generator.forward(inputs)
-            uir_loss = UIR_loss(mu, logvar, recon, inputs)
-            sti_loss = STI_loss(mu, logvar, pred, labels)                       # labeled data can provide loss for sti
-            uir_loss.backward(retain_graph=True)                                # TODO: check if need retain_graph
-            sti_loss.backward()
-            optim_generator.step()
 
+            # VAE step, train UIR and STI (Generator)
+            y_l, recon_l, z_l, mu_l, logvar_l = generator.forward(labeled_imgs)    # labeled data flow
+            uir_l_loss = UIR_loss(mu_l, logvar_l, recon_l, labeled_imgs)
+            sti_loss = STI_loss(mu_l, logvar_l, y_l, labels)                       # labeled data provide loss for sti
 
-            # train discriminator
-            z = z.detach()                                                      # no need to track gradient for z
-            pred_discriminator = discriminator.forward(z)                       # discriminator tells whether data is labeled/unlabeled
-            discriminator_loss = Discriminator_labeled_loss(pred_discriminator) # ground truth for labeled sample is one
-            discriminator_loss.backward()
-            optim_discriminator.step()
+            _, recon_u, z_u, mu_u, logvar_u = generator.forward(unlabeled_imgs)    # unlabeled data flow
+            uir_u_loss = UIR_loss(mu_u, logvar_u, recon_u, unlabeled_imgs)
 
-            oui_train_loss += oui_loss.item()
-            uir_train_loss += uir_loss.item()
-            sti_train_loss += sti_loss.item()
-            # record 4 loss every minibatch
-            if i % (len(train_labeled_loader)/4) == (len(train_labeled_loader)/4) - 1:
-                print("Epoch: " + str(epoch) + " / " + str(Epochs) +
-                      "  Labeled Batch:" + str(i) + " / " + str(len(train_labeled_loader)))
-                print("OUI Loss: " + str(oui_train_loss / (len(train_labeled_loader)/4))
-                      + " UIR Loss: " + str(uir_train_loss / (len(train_labeled_loader)/4))
-                      + " STI Loss: " + str(sti_train_loss / (len(train_labeled_loader)/4)) )
+            labeled_preds = discriminator(mu_l)             # mu computer from z, discriminator learn from latent space
+            unlabeled_preds = discriminator(mu_u)
 
-                # record loss
-                oui_train_loss_record.append(oui_train_loss / (len(train_labeled_loader)/4))
-                uir_train_loss_record.append(uir_train_loss / (len(train_labeled_loader)/4))
-                sti_train_loss_record.append(sti_train_loss / (len(train_labeled_loader)/4))
-                discriminator_train_loss_record.append(discriminator_train_loss_record[-1])   # No new values for discriminator loss
+            # labeled is 1, unlabeled is 0
+            lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
+            unlab_real_preds = torch.ones(unlabeled_imgs.size(0), 1)    # -E[log( D(q_phi(z_u|x_u)) )]
+            lab_real_preds = lab_real_preds.to(device)
+            unlab_real_preds = unlab_real_preds.to(device)
 
-                oui_train_loss = 0.0
-                uir_train_loss = 0.0
-                sti_train_loss = 0.0
+            adv_loss = adversary_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_real_preds)
 
+            # L_G = lambda1 * L_uir + lambda2 * L_sti + lambda3 * adv_loss, total generator loss
+            uir_loss = uir_l_loss + uir_u_loss
+            total_vae_loss = uir_loss + sti_loss + adv_loss             # TODO: validate for lambda
 
-        # Train with unlabeled data
-        uir_train_loss = 0.0
-        discriminator_train_loss = 0.0
-        for i, data_sample in enumerate(train_unlabeled_loader, 0):
-
-            inputs, _ = data_sample             # will not use labels, regarded as unlabeled data
-            inputs = inputs.to(device)
-
-            # set gradient to zero
             optim_generator.zero_grad()
-            optim_discriminator.zero_grad()
-
-            # train generator
-            _, recon, z, mu, logvar = generator.forward(inputs)
-            uir_loss = UIR_loss(mu, logvar, recon, inputs)
-            uir_loss.backward()                                                   # unlabeled, only update UIR weight
+            total_vae_loss.backward()
             optim_generator.step()
 
-            # get uncertainty score from OUI
-            pred_oui = oui.forward(inputs)                  # pred_oui is possibility vector
-            uncertainty = oui.getUncertainty(pred_oui)
 
-            # train discriminator
-            z = z.detach()                                  # no need to track gradient for z
-            uncertainty = torch.cat([uncertainty, uncertainty], dim=0)    # make same size as z
-            uncertainty = uncertainty.detach()                            # no need to track gradient for uncertainty
+            # Train Discriminator
+            with torch.no_grad():
+                _, _, _, mu_l, _ = generator.forward(labeled_imgs)
+                _, _, _, mu_u, _ = generator.forward(unlabeled_imgs)
 
-            pred_discriminator = discriminator.forward(z)  # TODO: check sign
-            discriminator_loss = Discriminator_unlabeled_loss(uncertainty, pred_discriminator) # ground truth for labeled sample is zero
-            discriminator_loss.backward()
+                # Get uncertainty score
+                pred_l_oui = oui.forward(unlabeled_imgs)                # pred_oui is possibility vector, 0~1
+                uncertainty = oui.getUncertainty(pred_l_oui)            # TODO: check uncertainty values
+
+            labeled_preds = discriminator(mu_l)
+            unlabeled_preds = discriminator(mu_u)
+
+            lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
+            unlab_fake_preds = torch.zeros(unlabeled_imgs.size(0), 1)       # TODO: relate to uncertainty here, -E[log(uncertainty - D(q_phi(z_u|x_u)) )]
+            lab_real_preds = lab_real_preds.to(device)
+            unlab_fake_preds = unlab_fake_preds.to(device)
+
+            dsc_loss = discriminator_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_fake_preds)
+
+            optim_discriminator.zero_grad()
+            dsc_loss.backward()
             optim_discriminator.step()
 
-            uir_train_loss += uir_loss.item()
-            discriminator_train_loss += discriminator_loss.item()
-            # record 4 loss every minibatch
-            if i % (len(train_unlabeled_loader) / 4) == (len(train_unlabeled_loader) / 4) - 1:
-                print("Epoch: " + str(epoch) + " / " + str(Epochs) +
-                      "  Unlabeled Batch:" + str(i) + " / " + str(len(train_unlabeled_loader)))
-                print("UIR Loss: " + str(uir_train_loss / (len(train_unlabeled_loader) / 4))
-                      + " Discriminator Loss: " + str(discriminator_train_loss / (len(train_unlabeled_loader) / 4)))
 
-                # record loss
-                oui_train_loss_record.append(oui_train_loss_record[-1])
-                uir_train_loss_record.append(uir_train_loss / (len(train_unlabeled_loader) / 10))
-                sti_train_loss_record.append(sti_train_loss_record[-1])
-                discriminator_train_loss_record.append(discriminator_train_loss / (len(train_unlabeled_loader) / 10))
+            # print loss
+            if iter_count % 100 == 0:
+                print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
+                print('Current training iteration:' + str(iter_count) + " / " + str(train_iterations))
+                print('Current task model loss: {:.4f}'.format(oui_loss.item()))
+                print('Current vae model loss: {:.4f}'.format(total_vae_loss.item()))
+                print('Current discriminator model loss: {:.4f}'.format(dsc_loss.item()))
+                print("Current labeled set size: " + str(len(labeled_indices)) +
+                      " Unlabeled set size: " + str(len(unlabeled_indices)))
+                print("\n")
 
-                uir_train_loss = 0.0
-                discriminator_train_loss = 0.0
-
+                iteration.append(iter_count)
+                oui_train_loss_record.append(oui_loss.item())
+                generator_train_loss_record.append(total_vae_loss.item())
+                discriminator_train_loss_record.append(dsc_loss.item())
 
 
-        # Relabeling, every epoch
-        if len(labeled_set) <= 0.4 * NUM_TRAIN:             # Relabel until labeled set reaches 40% of total samples
+
+        # Relabeling each epoch
+        if len(labeled_indices) <= 0.4 * ImgNum:
             print("Relabeling")
-            relabeling_loader = data.DataLoader(trainset_unlabeled, batch_size=BatchSize,
-                                                sampler=sampler.SequentialSampler(unlabeled_set), pin_memory=True)
+            all_preds = []
+            all_indices = []
 
-            # Access data sequentially, track indices
-            relabeling_set = [[], []]
-            for i, data_sample in enumerate(relabeling_loader, 0):
-                # print("Unlabeled pool: " + str(i) + " / " + str(len(relabeling_loader)))
+            for imgs, _, indices in unlabeled_dataloader:
+                imgs = imgs.to(device)
+                # stop tracking gradient, get discriminator prediction
+                with torch.no_grad():
+                    _, _, _, mu, _ = generator.forward(imgs)
+                    preds = discriminator.forward(mu)
+                # record state values and indices
+                preds = preds.cpu().data
+                all_preds.extend(preds)
+                all_indices.extend(indices)
 
-                inputs, _ = data_sample  # will not use labels, regarded as unlabeled data
-                inputs = inputs.to(device)
+            all_preds = torch.stack(all_preds)
+            all_preds = all_preds.view(-1)
+            # need to multiply by -1 to be able to use torch.topk
+            all_preds *= -1
 
-                # get corresponding indices in dataset
-                startId = i * relabeling_loader.batch_size
-                endId = startId + list(inputs.shape)[0]     # get exact number of data in current batch
-                indices = unlabeled_set[startId:endId]
+            # pick samples with top K state values to relabel
+            _, relabel_indices = torch.topk(all_preds, int(RelabelNum))
+            relabel_indices = np.asarray(all_indices)[relabel_indices]          # convert to numpy array
 
-                # get uncertainty score from OUI
-                pred_oui = oui.forward(inputs)              # pred_oui is possibility vector
-                uncertainty = oui.getUncertainty(pred_oui)
-                uncertainty = uncertainty.tolist()
+            labeled_indices = list(labeled_indices) + list(relabel_indices)
+            unlabeled_indices = np.setdiff1d(list(all_indices), labeled_indices)
 
-                # add to relabeling list
-                relabeling_set[0] += indices
-                relabeling_set[1] += uncertainty
-
-                relabeling_set = np.array(relabeling_set)
-                ind = np.argsort(relabeling_set[1, :])      # sort by uncertainty
-                ind = np.flip(ind)                          # descending order
-                relabeling_set = relabeling_set[:, ind]
-                relabeling_set = relabeling_set.tolist()
-
-                # keep top uncertainty data to relabel
-                if len(relabeling_set[0]) > RelabelNum:
-                    relabeling_set[0] = relabeling_set[0][:int(RelabelNum)]
-                    relabeling_set[1] = relabeling_set[1][:int(RelabelNum)]
-                i += relabeling_loader.batch_size
-
-            # Update labeled and unlabeled set, reload dataloader
-            relabeling_set = [int(e) for e in relabeling_set[0]]                        # convert to integer
-            labeled_set += relabeling_set                                               # move to labeled set
-            unlabeled_set = [e for e in unlabeled_set if e not in relabeling_set]       # remove from unlabeled set
-
-            # Update number of samples to relabel
-            RelabelNum = len(unlabeled_set) * 0.05
+            # Update number of images to relabel
+            RelabelNum = len(unlabeled_indices) * 0.05
 
 
         # Test target model (OUI)
-        # TODO: set to evaluation mode before testing
         correct = 0
         total = 0
         # Stop tracking gradient
@@ -317,9 +282,11 @@ if __name__ == "__main__":
                 total += test_labels.size(0)
                 correct += (predicted == test_labels).sum().item()
 
-        test_loss_record.append((1 - correct / total))
+        test_accuracy.append((1 - correct / total))
+        print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
         print("Accuracy of the network on the 10000 test images: %d %%" % (
                 100 * correct / total))
+        print("\n")
 
 
 
@@ -332,13 +299,11 @@ if __name__ == "__main__":
     # Save loss values
     print("Save loss record")
     oui_train_loss_record = np.array(oui_train_loss_record)
-    uir_train_loss_record = np.array(uir_train_loss_record)
-    sti_train_loss_record = np.array(sti_train_loss_record)
+    generator_train_loss_record = np.array(generator_train_loss_record)
     discriminator_train_loss_record = np.array(discriminator_train_loss_record)
-    test_loss_record = np.array(test_loss_record)
+    test_accuracy_record = np.array(test_accuracy)
 
     np.savetxt("results/oui_train_loss.out", oui_train_loss_record, delimiter=",")
-    np.savetxt("results/uir_train_loss.out", uir_train_loss_record, delimiter=",")
-    np.savetxt("results/sti_train_loss.out", sti_train_loss_record, delimiter=",")
+    np.savetxt("results/generator_train_loss.out", generator_train_loss_record, delimiter=",")
     np.savetxt("results/discriminator_train_loss.out", discriminator_train_loss_record, delimiter=",")
-    np.savetxt("results/test_loss.out", test_loss_record, delimiter=",")
+    np.savetxt("results/test_accuracy.out", test_accuracy_record, delimiter=",")
