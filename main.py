@@ -140,7 +140,6 @@ if __name__ == "__main__":
 
 
     # Start training
-    # TODO: split epoch, relabel each epoch
     print("Training start")
     for epoch in range(Epochs):
         # Update dataloader
@@ -151,7 +150,6 @@ if __name__ == "__main__":
 
         for iter_count in range(train_iterations):
             # dynamic learning rate for target model
-            # TODO: accuracy stuck
             total_iter = (iter_count + epoch * train_iterations)
             if total_iter != 0 and total_iter % lr_change == 0:
                 for param in optim_oui.param_groups:
@@ -173,111 +171,110 @@ if __name__ == "__main__":
             optim_oui.step()
 
 
-            # # VAE step, train UIR and STI (Generator)
-            # y_l, recon_l, z_l, mu_l, logvar_l = generator.forward(labeled_imgs)    # labeled data flow
-            # uir_l_loss = UIR_loss(mu_l, logvar_l, recon_l, labeled_imgs)
-            # sti_loss = STI_loss(mu_l, logvar_l, y_l, labels)                       # labeled data provide loss for sti
-            #
-            # _, recon_u, z_u, mu_u, logvar_u = generator.forward(unlabeled_imgs)    # unlabeled data flow
-            # uir_u_loss = UIR_loss(mu_u, logvar_u, recon_u, unlabeled_imgs)
-            #
-            # labeled_preds = discriminator(mu_l)             # mu computer from z, discriminator learn from latent space
-            # unlabeled_preds = discriminator(mu_u)
-            #
-            # # labeled is 1, unlabeled is 0
-            # lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
-            # unlab_real_preds = torch.ones(unlabeled_imgs.size(0), 1)    # -E[log( D(q_phi(z_u|x_u)) )]
-            # lab_real_preds = lab_real_preds.to(device)
-            # unlab_real_preds = unlab_real_preds.to(device)
-            #
-            # adv_loss = adversary_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_real_preds)
-            #
-            # # L_G = lambda1 * L_uir + lambda2 * L_sti + lambda3 * adv_loss, total generator loss
-            # uir_loss = uir_l_loss + uir_u_loss
-            # total_vae_loss = uir_loss + sti_loss + adv_loss             # TODO: validate for lambda
-            #
-            # optim_generator.zero_grad()
-            # total_vae_loss.backward()
-            # optim_generator.step()
-            #
-            #
-            # # Train Discriminator
-            # with torch.no_grad():
-            #     _, _, _, mu_l, _ = generator.forward(labeled_imgs)
-            #     _, _, _, mu_u, _ = generator.forward(unlabeled_imgs)
-            #
-            #     # Get uncertainty score
-            #     pred_l_oui = oui.forward(unlabeled_imgs)                # pred_oui is possibility vector, 0~1
-            #     uncertainty = oui.getUncertainty(pred_l_oui)            # TODO: check uncertainty values
-            #     uncertainty = torch.reshape(uncertainty, [uncertainty.size(0), 1])
-            #     uncertainty = uncertainty.cpu()
-            #
-            #
-            # labeled_preds = discriminator(mu_l)
-            # unlabeled_preds = discriminator(mu_u)
-            #
-            # lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
-            # unlab_fake_preds = torch.ones(unlabeled_imgs.size(0), 1)       # TODO: relate to uncertainty here, -E[log(uncertainty - D(q_phi(z_u|x_u)) )]
-            # unlab_fake_preds = unlab_fake_preds - uncertainty
-            # lab_real_preds = lab_real_preds.to(device)
-            # unlab_fake_preds = unlab_fake_preds.to(device)
-            #
-            # dsc_loss = discriminator_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_fake_preds)
-            #
-            # optim_discriminator.zero_grad()
-            # dsc_loss.backward()
-            # optim_discriminator.step()
-            #
-            #
-            # # print loss
-            # if iter_count % (train_iterations // 4) == train_iterations // 4 - 1:
-            #     print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
-            #     print('Current training iteration:' + str(iter_count) + " / " + str(train_iterations))
-            #     print('Current task model loss: {:.4f}'.format(oui_loss.item()))
-            #     print('Current vae model loss: {:.4f}'.format(total_vae_loss.item()))
-            #     print('Current discriminator model loss: {:.4f}'.format(dsc_loss.item()))
-            #     print("Current labeled set size: " + str(len(labeled_indices)) +
-            #           " Unlabeled set size: " + str(len(unlabeled_indices)))
-            #     print("\n")
-            #
-            #     iteration.append(iter_count)
-            #     oui_train_loss_record.append(oui_loss.item())
-            #     generator_train_loss_record.append(total_vae_loss.item())
-            #     discriminator_train_loss_record.append(dsc_loss.item())
+            # VAE step, train UIR and STI (Generator)
+            y_l, recon_l, z_l, mu_l, logvar_l = generator.forward(labeled_imgs)    # labeled data flow
+            uir_l_loss = UIR_loss(mu_l, logvar_l, recon_l, labeled_imgs)
+            sti_loss = STI_loss(mu_l, logvar_l, y_l, labels)                       # labeled data provide loss for sti
+
+            _, recon_u, z_u, mu_u, logvar_u = generator.forward(unlabeled_imgs)    # unlabeled data flow
+            uir_u_loss = UIR_loss(mu_u, logvar_u, recon_u, unlabeled_imgs)
+
+            labeled_preds = discriminator(mu_l)             # mu computer from z, discriminator learn from latent space
+            unlabeled_preds = discriminator(mu_u)
+
+            # labeled is 1, unlabeled is 0
+            lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
+            unlab_real_preds = torch.ones(unlabeled_imgs.size(0), 1)    # -E[log( D(q_phi(z_u|x_u)) )]
+            lab_real_preds = lab_real_preds.to(device)
+            unlab_real_preds = unlab_real_preds.to(device)
+
+            adv_loss = adversary_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_real_preds)
+
+            # L_G = lambda1 * L_uir + lambda2 * L_sti + lambda3 * adv_loss, total generator loss
+            uir_loss = uir_l_loss + uir_u_loss
+            total_vae_loss = uir_loss + sti_loss + adv_loss
+
+            optim_generator.zero_grad()
+            total_vae_loss.backward()
+            optim_generator.step()
 
 
-        # # Relabeling each epoch
-        # # TODO: figure out the relabel condition
-        # if len(labeled_indices) <= 0.4 * len(unlabeled_indices):
-        #     print("Relabeling")
-        #     all_preds = []
-        #     all_indices = []
-        #
-        #     for imgs, _, indices in unlabeled_dataloader:
-        #         imgs = imgs.to(device)
-        #         # stop tracking gradient, get discriminator prediction
-        #         with torch.no_grad():
-        #             _, _, _, mu, _ = generator.forward(imgs)
-        #             preds = discriminator.forward(mu)
-        #         # record state values and indices
-        #         preds = preds.cpu().data
-        #         all_preds.extend(preds)
-        #         all_indices.extend(indices)
-        #
-        #     all_preds = torch.stack(all_preds)
-        #     all_preds = all_preds.view(-1)
-        #     # need to multiply by -1 to be able to use torch.topk
-        #     all_preds *= -1
-        #
-        #     # pick samples with top K state values to relabel
-        #     _, relabel_indices = torch.topk(all_preds, int(RelabelNum))
-        #     relabel_indices = np.asarray(all_indices)[relabel_indices]          # convert to numpy array
-        #
-        #     labeled_indices = list(labeled_indices) + list(relabel_indices)
-        #     unlabeled_indices = np.setdiff1d(list(all_indices), labeled_indices)
-        #
-        #     # Update number of images to relabel
-        #     RelabelNum = len(unlabeled_indices) * 0.05
+            # Train Discriminator
+            with torch.no_grad():
+                _, _, _, mu_l, _ = generator.forward(labeled_imgs)
+                _, _, _, mu_u, _ = generator.forward(unlabeled_imgs)
+
+                # Get uncertainty score
+                pred_l_oui = oui.forward(unlabeled_imgs)                # pred_oui is possibility vector, 0~1
+                uncertainty = oui.getUncertainty(pred_l_oui)            # TODO: check uncertainty values
+                uncertainty = torch.reshape(uncertainty, [uncertainty.size(0), 1])
+                uncertainty = uncertainty.cpu()
+
+
+            labeled_preds = discriminator(mu_l)
+            unlabeled_preds = discriminator(mu_u)
+
+            lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
+            unlab_fake_preds = torch.ones(unlabeled_imgs.size(0), 1)       # relate to uncertainty here, -E[log(uncertainty - D(q_phi(z_u|x_u)) )]
+            unlab_fake_preds = unlab_fake_preds - uncertainty
+            lab_real_preds = lab_real_preds.to(device)
+            unlab_fake_preds = unlab_fake_preds.to(device)
+
+            dsc_loss = discriminator_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_fake_preds)
+
+            optim_discriminator.zero_grad()
+            dsc_loss.backward()
+            optim_discriminator.step()
+
+
+            # print loss
+            if iter_count % (train_iterations // 4) == train_iterations // 4 - 1:
+                print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
+                print('Current training iteration:' + str(iter_count) + " / " + str(train_iterations))
+                print('Current task model loss: {:.4f}'.format(oui_loss.item()))
+                print('Current vae model loss: {:.4f}'.format(total_vae_loss.item()))
+                print('Current discriminator model loss: {:.4f}'.format(dsc_loss.item()))
+                print("Current labeled set size: " + str(len(labeled_indices)) +
+                      " Unlabeled set size: " + str(len(unlabeled_indices)))
+                print("\n")
+
+                iteration.append(iter_count)
+                oui_train_loss_record.append(oui_loss.item())
+                generator_train_loss_record.append(total_vae_loss.item())
+                discriminator_train_loss_record.append(dsc_loss.item())
+
+
+        # Relabeling each epoch
+        if len(labeled_indices) <= 0.4 * len(unlabeled_indices):
+            print("Relabeling")
+            all_preds = []
+            all_indices = []
+
+            for imgs, _, indices in unlabeled_dataloader:
+                imgs = imgs.to(device)
+                # stop tracking gradient, get discriminator prediction
+                with torch.no_grad():
+                    _, _, _, mu, _ = generator.forward(imgs)
+                    preds = discriminator.forward(mu)
+                # record state values and indices
+                preds = preds.cpu().data
+                all_preds.extend(preds)
+                all_indices.extend(indices)
+
+            all_preds = torch.stack(all_preds)
+            all_preds = all_preds.view(-1)
+            # need to multiply by -1 to be able to use torch.topk
+            all_preds *= -1
+
+            # pick samples with top K state values to relabel
+            _, relabel_indices = torch.topk(all_preds, int(RelabelNum))
+            relabel_indices = np.asarray(all_indices)[relabel_indices]          # convert to numpy array
+
+            labeled_indices = list(labeled_indices) + list(relabel_indices)
+            unlabeled_indices = np.setdiff1d(list(all_indices), labeled_indices)
+
+            # Update number of images to relabel
+            RelabelNum = len(unlabeled_indices) * 0.05
 
 
         # Test target model (OUI)
@@ -304,11 +301,11 @@ if __name__ == "__main__":
 
 
 
-    # # Save model
-    # print("Save model")
-    # torch.save(oui.state_dict(), "results/oui_state_dict.pt")
-    # torch.save(generator.state_dict(), "results/generator_state_dict.pt")
-    # torch.save(discriminator.state_dict(), "results/discriminator_state_dict.pt")
+    # Save model
+    print("Save model")
+    torch.save(oui.state_dict(), "results/oui_state_dict.pt")
+    torch.save(generator.state_dict(), "results/generator_state_dict.pt")
+    torch.save(discriminator.state_dict(), "results/discriminator_state_dict.pt")
 
     # Save loss values
     print("Save loss record")

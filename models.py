@@ -20,6 +20,7 @@ class View(nn.Module):
 
 # Online uncertainty indicator
 class OUI(nn.Module):
+    # TODO: need to change task model to ResNet-18
     def __init__(self, channelNum=3, classNum=10, ngpu=0):
         super(OUI, self).__init__()
 
