@@ -6,6 +6,6 @@ Wenxuan Ou Summer 2021 Project in XuLab, CMU
 
 Python 3.9
 
-torch 1.8.1+cu111
+torch 1.9.0+cu111
 
 torchvision 0.9.1+cu111
