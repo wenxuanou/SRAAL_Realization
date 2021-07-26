@@ -2,6 +2,8 @@
 
 Wenxuan Ou Summer 2021 Project in XuLab, CMU
 
+Note: Branch ResNet-18 takes ResNet-18 as target model
+
 ## Environment
 
 Python 3.9
