@@ -18,67 +18,6 @@ class View(nn.Module):
         return tensor.view(self.size)
 
 
-# Online uncertainty indicator
-class OUI(nn.Module):
-    # TODO: need to change task model to ResNet-18
-    def __init__(self, channelNum=3, classNum=10, ngpu=0):
-        super(OUI, self).__init__()
-
-        self.ngpu = ngpu
-        self.channelNum = channelNum
-        self.classNum = classNum
-
-        # Define target classifier model
-        self.classifier = nn.Sequential(
-            nn.Conv2d(channelNum, 6, 5),             # B, 6, 32, 32
-            nn.ReLU(True),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(6, 16, 5),            # B, 16, 28, 28
-            nn.ReLU(True),
-            nn.MaxPool2d(2, 2),
-            nn.Flatten(),                   # Flatten all dimension
-            nn.Linear(16 * 5 * 5, 120),     # B, 120
-            nn.ReLU(True),
-            nn.Linear(120, 84),             # B, 84
-            nn.ReLU(True),
-            nn.Linear(84, classNum),              # B, 10; for CIFAR10, classNum is 10
-        )
-
-    def forward(self, x):
-        # CIFAR10 image size is 3*32*32
-        return self.classifier(x)
-
-    def getUncertainty(self, V):
-        # For classification, input V is the possibility vector for each category
-        # OUI only compute uncertainty of unlabeled data
-
-        # TODO: check size of V
-        # V: dataNum * classNum
-
-        maxV = torch.amax(V, axis=1)       # max of each category
-        varV = torch.var(V, axis=1, unbiased=True)        # variance of each data point
-
-        # TODO: original minVarV computation not work, try custom one
-        # minVarV = torch.pow((1 / self.classNum) - maxV, 2)
-        # minVarV += (self.classNum - 1) * torch.pow((1 / self.classNum) - torch.divide((1 - maxV), (1 - self.classNum)), 2)
-        # minVarV *= (1 / self.classNum)
-
-        # minVarV = (1 / self.classNum) \
-        #           * (torch.pow((1 / self.classNum) - maxV, 2)
-        #              + (self.classNum - 1) * torch.pow((1 / self.classNum) - (1 - maxV) / (1 - self.classNum), 2)
-        #              )
-
-        # uncertainty = 1 - torch.multiply(torch.divide(minVarV, varV), maxV)
-
-        minVarV = torch.amin(varV)
-        uncertainty = torch.divide(minVarV, varV)
-        uncertainty = torch.multiply(uncertainty, maxV)         # TODO: figure out the size of uncertainty
-        uncertainty = 1 - uncertainty
-
-        # TODO: check uncertainty score should between 0 and 1, size: dataNum * 1
-        return uncertainty  # return the overall uncertainty of every unlabeled data point
-
-
 # Generator, including STI and UIR
 class Generator(nn.Module):
     def __init__(self, channelNum=3, featureDim=32 * 20 * 20, zDim=256, classNum=10, ngpu=0):

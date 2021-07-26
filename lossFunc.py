@@ -7,10 +7,10 @@ import torch.nn.functional as F
 # import numpy as np
 
 def OUI_loss(output, labels):
-    # TODO: change to loss function for Resnet-18
-    # Loss for the classifier
-    criterion = nn.CrossEntropyLoss()
+    # Task model loss
+    criterion = nn.CrossEntropyLoss(reduction='none')
     loss = criterion(output, labels)
+    loss = torch.sum(loss) / loss.size(0)
     return loss
 
 

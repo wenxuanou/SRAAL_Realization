@@ -7,12 +7,20 @@ from torchvision import datasets, transforms
 import torch.utils.data.sampler as sampler
 import torch.utils.data as data
 import torch.optim as optim
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim.lr_scheduler as lr_scheduler
 
 import numpy as np
 import random
-from models import OUI, Generator, StateDiscriminator, weights_init
-from lossFunc import OUI_loss, STI_loss, UIR_loss, adversary_loss, discriminator_loss, Discriminator_labeled_loss, Discriminator_unlabeled_loss
+from tqdm import tqdm                 # progress bar
+
+from ResNet import resnet              # Use ResNet as task model
+from models import Generator, StateDiscriminator, weights_init
+from lossFunc import OUI_loss, STI_loss, UIR_loss, adversary_loss, discriminator_loss
+from utils import getUncertainty
 import customDataset
+
 
 
 def cifar_transformer():
@@ -84,16 +92,20 @@ if __name__ == "__main__":
     # Parameters
     DataPath = "./data"                             # dataset directory
     OutPath = "./results"                           # output log directory
-    LogName = "accuracies.log"                      # save final model performance
     BatchSize = 128                                 # batch size for training and testing
     ImgNum = 50000                               # CIFAR10 training set has 50000 samples in total
-    # Epochs = 100                                  # training epochs
-    Epochs = 100
+    Epochs = 200                                  # training epochs (original: 100)
     ZDim = 32                                       # VAE latent dimension
     Beta = 1                                        # VAE hyperparameter
     M = ImgNum * 0.1                             # initial labeled set size (original: 10%)
     ClassNum = 10                                   # CIFAR10: 10; CIFAR100: 100
     RelabelNum = ImgNum * 0.9 * 0.05             # number of samples to relabel each epoch (original: 5% of the unlabeled set, dynamically)
+    # ResNet Parameters
+    LR = 0.1
+    MILESTONES = [160]
+    EPOCHL = 120  # After 120 epochs, stop the gradient from the loss prediction module propagated to the target model
+    MOMENTUM = 0.9
+    WDECAY = 5e-4
 
 
     # Compute actual training iterations per epoch
@@ -114,24 +126,31 @@ if __name__ == "__main__":
     print("Initializing labeled set")
     labeled_indices, unlabeled_indices = labeledSetInit(ImgNum, int(M))  # Labeled set index initialization
 
-
     # Initialize network
     generator = Generator(channelNum=3, zDim=ZDim, classNum=ClassNum, ngpu=1).to(device)
-    oui = OUI(channelNum=3, classNum=ClassNum, ngpu=1).to(device)           # OUI trains the target model
+    # oui = OUI(channelNum=3, classNum=ClassNum, ngpu=1).to(device)           # OUI trains the target model
     discriminator = StateDiscriminator(ZDim).to(device)
+    # Initialize ResNet
+    resnet = resnet.ResNet18(num_classes=10).to(device)
 
     generator.apply(weights_init)
-    oui.apply(weights_init)
+    # oui.apply(weights_init)
     discriminator.apply(weights_init)
 
     # Initialize optimizer
-    optim_oui = optim.SGD(oui.parameters(), lr=0.01, weight_decay=5e-4, momentum=0.9)   # Use SGD for target classifier
+    # optim_oui = optim.SGD(oui.parameters(), lr=0.01, weight_decay=5e-4, momentum=0.9)   # Use SGD for target classifier
     optim_generator = optim.Adam(generator.parameters(), lr=5e-4)
     optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
 
+    # ResNet optimizer and scheduler
+    optim_resNet = optim.SGD(resnet.parameters(), lr=LR,
+                             momentum=MOMENTUM, weight_decay=WDECAY)
+    sched_resNet = lr_scheduler.MultiStepLR(optim_resNet, milestones=MILESTONES)    # ResNet scheduler
+
+
+
 
     # Tracking training loss
-    iteration = [0]
     oui_train_loss_record = [0]
     generator_train_loss_record = [0]
     discriminator_train_loss_record = [0]
@@ -148,12 +167,14 @@ if __name__ == "__main__":
         labeled_data = extract_data(labeled_dataloader)                         # make iterable
         unlabeled_data = extract_data(unlabeled_dataloader, labels=False)
 
-        for iter_count in range(train_iterations):
-            # dynamic learning rate for target model
-            total_iter = (iter_count + epoch * train_iterations)
-            if total_iter != 0 and total_iter % lr_change == 0:
-                for param in optim_oui.param_groups:
-                    param['lr'] = param['lr'] / 10      # Reduce learning rate, (original: divide by 10)
+        # update ResNet scheduler
+        sched_resNet.step()
+        # set ResNet in train mode
+        resnet.train()
+
+        print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
+
+        for iter_count in tqdm(range(train_iterations)):
 
             labeled_imgs, labels, labeled_batch_id = next(labeled_data)
             unlabeled_imgs, unlabeled_batch_id = next(unlabeled_data)
@@ -162,13 +183,12 @@ if __name__ == "__main__":
             labels = labels.to(device)
             unlabeled_imgs = unlabeled_imgs.to(device)
 
-
-            # Train OUI (target model)
-            pred_oui = oui.forward(labeled_imgs)
-            oui_loss = OUI_loss(pred_oui, labels)
-            optim_oui.zero_grad()
-            oui_loss.backward()
-            optim_oui.step()
+            # Train ResNet
+            optim_resNet.zero_grad()
+            pred_resnet, _ = resnet(labeled_imgs)
+            resnet_loss = OUI_loss(pred_resnet, labels)          # cross entropy loss
+            resnet_loss.backward()
+            optim_resNet.step()
 
 
             # VAE step, train UIR and STI (Generator)
@@ -205,18 +225,18 @@ if __name__ == "__main__":
                 _, _, _, mu_u, _ = generator.forward(unlabeled_imgs)
 
                 # Get uncertainty score
-                pred_l_oui = oui.forward(unlabeled_imgs)                # pred_oui is possibility vector, 0~1
-                uncertainty = oui.getUncertainty(pred_l_oui)            # TODO: check uncertainty values
+                pred_l_oui, _ = resnet(unlabeled_imgs)                # pred_oui is prediction, need to map to 0~1
+                pred_l_oui = F.softmax(pred_l_oui, dim=1)
+                uncertainty = getUncertainty(pred_l_oui, ClassNum)            # TODO: check uncertainty values
                 uncertainty = torch.reshape(uncertainty, [uncertainty.size(0), 1])
                 uncertainty = uncertainty.cpu()
-
 
             labeled_preds = discriminator(mu_l)
             unlabeled_preds = discriminator(mu_u)
 
             lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
             unlab_fake_preds = torch.ones(unlabeled_imgs.size(0), 1)       # relate to uncertainty here, -E[log(uncertainty - D(q_phi(z_u|x_u)) )]
-            unlab_fake_preds = unlab_fake_preds - uncertainty
+            unlab_fake_preds = unlab_fake_preds - uncertainty               # TODO: check if this is correct
             lab_real_preds = lab_real_preds.to(device)
             unlab_fake_preds = unlab_fake_preds.to(device)
 
@@ -227,25 +247,24 @@ if __name__ == "__main__":
             optim_discriminator.step()
 
 
-            # print loss
-            if iter_count % (train_iterations // 4) == train_iterations // 4 - 1:
-                print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
-                print('Current training iteration:' + str(iter_count) + " / " + str(train_iterations))
-                print('Current task model loss: {:.4f}'.format(oui_loss.item()))
-                print('Current vae model loss: {:.4f}'.format(total_vae_loss.item()))
-                print('Current discriminator model loss: {:.4f}'.format(dsc_loss.item()))
-                print("Current labeled set size: " + str(len(labeled_indices)) +
-                      " Unlabeled set size: " + str(len(unlabeled_indices)))
-                print("\n")
-
-                iteration.append(iter_count)
-                oui_train_loss_record.append(oui_loss.item())
-                generator_train_loss_record.append(total_vae_loss.item())
-                discriminator_train_loss_record.append(dsc_loss.item())
+            # # print loss
+            # if iter_count % (train_iterations // 4) == train_iterations // 4 - 1:
+            #     print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
+            #     print('Current training iteration:' + str(iter_count) + " / " + str(train_iterations))
+            #     print('Current task model loss: {:.4f}'.format(resnet_loss.item()))
+            #     print('Current vae model loss: {:.4f}'.format(total_vae_loss.item()))
+            #     print('Current discriminator model loss: {:.4f}'.format(dsc_loss.item()))
+            #     print("Current labeled set size: " + str(len(labeled_indices)) +
+            #           " Unlabeled set size: " + str(len(unlabeled_indices)))
+            #     print("\n")
+            #
+            #     oui_train_loss_record.append(resnet_loss.item())
+            #     generator_train_loss_record.append(total_vae_loss.item())
+            #     discriminator_train_loss_record.append(dsc_loss.item())
 
 
         # Relabeling each epoch
-        if len(labeled_indices) <= 0.4 * len(unlabeled_indices):
+        if len(labeled_indices) <= 0.4 * ImgNum:               # labeled set increase to 40% full dataset
             print("Relabeling")
             all_preds = []
             all_indices = []
@@ -281,40 +300,42 @@ if __name__ == "__main__":
         correct = 0
         total = 0
         # Stop tracking gradient
+        resnet.eval()
         with torch.no_grad():
             for test_sample in test_loader:
                 test_inputs, test_labels = test_sample
                 test_inputs = test_inputs.to(device)
                 test_labels = test_labels.to(device)
 
-                pred_test = oui.forward(test_inputs)
+                pred_test,_ = resnet.forward(test_inputs)
 
                 _, predicted = torch.max(pred_test.data, 1)
                 total += test_labels.size(0)
                 correct += (predicted == test_labels).sum().item()
 
         test_accuracy.append(correct / total)
-        print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
+        print("Current labeled set size: " + str(len(labeled_indices)) +
+              " Unlabeled set size: " + str(len(unlabeled_indices)))
         print("Accuracy of the network on the 10000 test images: %d %%" % (
                 100 * correct / total))
         print("\n")
 
 
 
-    # Save model
-    print("Save model")
-    torch.save(oui.state_dict(), "results/oui_state_dict.pt")
-    torch.save(generator.state_dict(), "results/generator_state_dict.pt")
-    torch.save(discriminator.state_dict(), "results/discriminator_state_dict.pt")
+    # # Save model
+    # print("Save model")
+    # torch.save(oui.state_dict(), "results/oui_state_dict.pt")
+    # torch.save(generator.state_dict(), "results/generator_state_dict.pt")
+    # torch.save(discriminator.state_dict(), "results/discriminator_state_dict.pt")
 
     # Save loss values
     print("Save loss record")
-    oui_train_loss_record = np.array(oui_train_loss_record)
-    generator_train_loss_record = np.array(generator_train_loss_record)
-    discriminator_train_loss_record = np.array(discriminator_train_loss_record)
+    # oui_train_loss_record = np.array(oui_train_loss_record)
+    # generator_train_loss_record = np.array(generator_train_loss_record)
+    # discriminator_train_loss_record = np.array(discriminator_train_loss_record)
     test_accuracy_record = np.array(test_accuracy)
 
-    np.savetxt("results/oui_train_loss.out", oui_train_loss_record, delimiter=",")
-    np.savetxt("results/generator_train_loss.out", generator_train_loss_record, delimiter=",")
-    np.savetxt("results/discriminator_train_loss.out", discriminator_train_loss_record, delimiter=",")
+    # np.savetxt("results/oui_train_loss.out", oui_train_loss_record, delimiter=",")
+    # np.savetxt("results/generator_train_loss.out", generator_train_loss_record, delimiter=",")
+    # np.savetxt("results/discriminator_train_loss.out", discriminator_train_loss_record, delimiter=",")
     np.savetxt("results/test_accuracy.out", test_accuracy_record, delimiter=",")
