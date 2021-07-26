@@ -100,6 +100,7 @@ if __name__ == "__main__":
     M = ImgNum * 0.1                             # initial labeled set size (original: 10%)
     ClassNum = 10                                   # CIFAR10: 10; CIFAR100: 100
     RelabelNum = ImgNum * 0.9 * 0.05             # number of samples to relabel each epoch (original: 5% of the unlabeled set, dynamically)
+    MaxLabelSize = 0.4 * ImgNum                  # maximum label set size available
     # ResNet Parameters
     LR = 0.1
     MILESTONES = [160]
@@ -128,7 +129,6 @@ if __name__ == "__main__":
 
     # Initialize network
     generator = Generator(channelNum=3, zDim=ZDim, classNum=ClassNum, ngpu=1).to(device)
-    # oui = OUI(channelNum=3, classNum=ClassNum, ngpu=1).to(device)           # OUI trains the target model
     discriminator = StateDiscriminator(ZDim).to(device)
     # Initialize ResNet
     resnet = resnet.ResNet18(num_classes=10).to(device)
@@ -138,7 +138,6 @@ if __name__ == "__main__":
     discriminator.apply(weights_init)
 
     # Initialize optimizer
-    # optim_oui = optim.SGD(oui.parameters(), lr=0.01, weight_decay=5e-4, momentum=0.9)   # Use SGD for target classifier
     optim_generator = optim.Adam(generator.parameters(), lr=5e-4)
     optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
 
@@ -148,12 +147,6 @@ if __name__ == "__main__":
     sched_resNet = lr_scheduler.MultiStepLR(optim_resNet, milestones=MILESTONES)    # ResNet scheduler
 
 
-
-
-    # Tracking training loss
-    oui_train_loss_record = [0]
-    generator_train_loss_record = [0]
-    discriminator_train_loss_record = [0]
     # Test loss
     test_accuracy = [0]
 
@@ -247,24 +240,8 @@ if __name__ == "__main__":
             optim_discriminator.step()
 
 
-            # # print loss
-            # if iter_count % (train_iterations // 4) == train_iterations // 4 - 1:
-            #     print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
-            #     print('Current training iteration:' + str(iter_count) + " / " + str(train_iterations))
-            #     print('Current task model loss: {:.4f}'.format(resnet_loss.item()))
-            #     print('Current vae model loss: {:.4f}'.format(total_vae_loss.item()))
-            #     print('Current discriminator model loss: {:.4f}'.format(dsc_loss.item()))
-            #     print("Current labeled set size: " + str(len(labeled_indices)) +
-            #           " Unlabeled set size: " + str(len(unlabeled_indices)))
-            #     print("\n")
-            #
-            #     oui_train_loss_record.append(resnet_loss.item())
-            #     generator_train_loss_record.append(total_vae_loss.item())
-            #     discriminator_train_loss_record.append(dsc_loss.item())
-
-
         # Relabeling each epoch
-        if len(labeled_indices) <= 0.4 * ImgNum:               # labeled set increase to 40% full dataset
+        if len(labeled_indices) <= MaxLabelSize:               # labeled set increase to 40% full dataset
             print("Relabeling")
             all_preds = []
             all_indices = []
@@ -323,19 +300,10 @@ if __name__ == "__main__":
 
 
     # # Save model
-    # print("Save model")
-    # torch.save(oui.state_dict(), "results/oui_state_dict.pt")
-    # torch.save(generator.state_dict(), "results/generator_state_dict.pt")
-    # torch.save(discriminator.state_dict(), "results/discriminator_state_dict.pt")
+    print("Save model")
+    torch.save(resnet.state_dict(), "results/resnet_state_dict.pt")
 
     # Save loss values
     print("Save loss record")
-    # oui_train_loss_record = np.array(oui_train_loss_record)
-    # generator_train_loss_record = np.array(generator_train_loss_record)
-    # discriminator_train_loss_record = np.array(discriminator_train_loss_record)
     test_accuracy_record = np.array(test_accuracy)
-
-    # np.savetxt("results/oui_train_loss.out", oui_train_loss_record, delimiter=",")
-    # np.savetxt("results/generator_train_loss.out", generator_train_loss_record, delimiter=",")
-    # np.savetxt("results/discriminator_train_loss.out", discriminator_train_loss_record, delimiter=",")
     np.savetxt("results/test_accuracy.out", test_accuracy_record, delimiter=",")
