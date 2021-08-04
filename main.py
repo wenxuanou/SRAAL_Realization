@@ -204,7 +204,6 @@ if __name__ == "__main__":
     test_loader, train_set = loadData(DataPath, BatchSize)
     # CIFAT10 comes with label, randomly select a few for labeled set and put the rest in unlabeled set
     print("Initializing labeled set")
-    # TODO: initialize label set with uir
     if RandomInit:
         labeled_indices, unlabeled_indices = labeledSetInit(ImgNum, int(M))  # Labeled set index initialization
     else:
