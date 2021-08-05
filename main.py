@@ -90,7 +90,7 @@ def labeledSetInit(num_train, M, I=10, generator=None, trainset=None, randomInit
                 unlabeled_id.extend(unlabeled_batch_id)
 
             # add the one with max of minDist to label set
-            minDist_u = torch.stack(minDist_u, dim=0)
+            minDist_u = torch.cat(minDist_u, dim=0)
             minDist_u = minDist_u.view(-1)
             _, id = torch.topk(minDist_u, 10)               # select top 10 samples add to labeled set, speed up
             id = id.cpu()
@@ -149,19 +149,20 @@ if __name__ == "__main__":
     OutPath = "./results"                           # output log directory
     BatchSize = 128                                 # batch size for training and testing
     ImgNum = 50000                               # CIFAR10 training set has 50000 samples in total
-    Epochs = 200                                  # training epochs (original: 100)
+    Cycles = 10                                   # active learning cycles
+    Epochs = 100                                  # ResNet training epochs (original: 100)
     ZDim = 32                                       # VAE latent dimension
     Beta = 1                                        # VAE hyperparameter
     M = ImgNum * 0.1                             # initial labeled set size (original: 10%)
     ClassNum = 10                                   # CIFAR10: 10; CIFAR100: 100
     RelabelNum = ImgNum * 0.9 * 0.05             # number of samples to relabel each epoch (original: 5% of the unlabeled set, dynamically)
     MaxLabelSize = 0.4 * ImgNum                  # maximum label set size available
-    RandomInit = False                            # initial label set sampling method, if False, use UIR to initialize
+    RandomInit = True                            # initial label set sampling method, if False, use UIR to initialize
     I = 10                                       # for labele set initialization using UIR, I << M
+
     # ResNet Parameters
     LR = 0.1
-    MILESTONES = [160]
-    EPOCHL = 120  # After 120 epochs, stop the gradient from the loss prediction module propagated to the target model
+    MILESTONES = [80]                          # original: 160
     MOMENTUM = 0.9
     WDECAY = 5e-4
 
@@ -182,21 +183,11 @@ if __name__ == "__main__":
     # Initialize network
     generator = Generator(channelNum=3, zDim=ZDim, classNum=ClassNum, ngpu=1).to(device)
     discriminator = StateDiscriminator(ZDim).to(device)
-    # Initialize ResNet
-    resnet = resnet.ResNet18(num_classes=10).to(device)
-
     generator.apply(weights_init)
-    # oui.apply(weights_init)
     discriminator.apply(weights_init)
 
-    # Initialize optimizer
-    optim_generator = optim.Adam(generator.parameters(), lr=5e-4)
-    optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
-
-    # ResNet optimizer and scheduler
-    optim_resNet = optim.SGD(resnet.parameters(), lr=LR,
-                             momentum=MOMENTUM, weight_decay=WDECAY)
-    sched_resNet = lr_scheduler.MultiStepLR(optim_resNet, milestones=MILESTONES)    # ResNet scheduler
+    # Initialize ResNet
+    resnet = resnet.ResNet18(num_classes=10).to(device)
 
 
     # Load data
@@ -217,104 +208,118 @@ if __name__ == "__main__":
 
     # Start training
     print("Training start")
-    for epoch in range(Epochs):
+    for cycles in range(Cycles):
         # Update dataloader
         labeled_dataloader, unlabeled_dataloader = updateDataloader(labeled_indices, unlabeled_indices,
                                                                     BatchSize, BatchSize, train_set)
-        labeled_data = extract_data(labeled_dataloader)                         # make iterable
+        labeled_data = extract_data(labeled_dataloader)  # make iterable
         unlabeled_data = extract_data(unlabeled_dataloader, labels=False)
 
-        # update ResNet scheduler
-        sched_resNet.step()
-        # set ResNet in train mode
-        resnet.train()
 
-        print("\n")
-        print("Epoch: " + str(epoch + 1) + " / " + str(Epochs))
+        # Reinitialize optimizer for each AL cycle
+        optim_generator = optim.Adam(generator.parameters(), lr=5e-4)
+        optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
 
-        for iter_count in tqdm(range(train_iterations)):
-
-            labeled_imgs, labels, _ = next(labeled_data)
-            unlabeled_imgs, _ = next(unlabeled_data)
-
-            labeled_imgs = labeled_imgs.to(device)      # send data to training device
-            labels = labels.to(device)
-            unlabeled_imgs = unlabeled_imgs.to(device)
-
-            # Train ResNet
-            optim_resNet.zero_grad()
-            pred_resnet, _ = resnet(labeled_imgs)
-            resnet_loss = OUI_loss(pred_resnet, labels)          # cross entropy loss
-            resnet_loss.backward()
-            optim_resNet.step()
+        # ResNet optimizer and scheduler
+        optim_resNet = optim.SGD(resnet.parameters(), lr=LR,
+                                 momentum=MOMENTUM, weight_decay=WDECAY)
+        sched_resNet = lr_scheduler.MultiStepLR(optim_resNet, milestones=MILESTONES)  # ResNet scheduler
 
 
-            # VAE step, train UIR and STI (Generator)
-            y_l, recon_l, z_l, mu_l, logvar_l = generator.forward(labeled_imgs)    # labeled data flow
-            uir_l_loss = UIR_loss(mu_l, logvar_l, recon_l, labeled_imgs)
-            sti_loss = STI_loss(mu_l, logvar_l, y_l, labels)                       # labeled data provide loss for sti
 
-            _, recon_u, z_u, mu_u, logvar_u = generator.forward(unlabeled_imgs)    # unlabeled data flow
-            uir_u_loss = UIR_loss(mu_u, logvar_u, recon_u, unlabeled_imgs)
+        # Network training epoch
+        for epoch in range(Epochs):
+            print("\n")
+            print("AL cycles: " + str(cycles) + " / " + str(Cycles)
+                  + " Epoch: " + str(epoch) + " / " + str(Epochs))
 
-            labeled_preds = discriminator(mu_l)             # mu computer from z, discriminator learn from latent space
-            unlabeled_preds = discriminator(mu_u)
+            # set ResNet in train mode
+            resnet.train()
 
-            # labeled is 1, unlabeled is 0
-            lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
-            unlab_real_preds = torch.ones(unlabeled_imgs.size(0), 1)    # -E[log( D(q_phi(z_u|x_u)) )]
-            lab_real_preds = lab_real_preds.to(device)
-            unlab_real_preds = unlab_real_preds.to(device)
+            for iter_count in tqdm(range(train_iterations)):
 
-            adv_loss = adversary_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_real_preds)
+                labeled_imgs, labels, _ = next(labeled_data)
+                unlabeled_imgs, _ = next(unlabeled_data)
 
-            # L_G = lambda1 * L_uir + lambda2 * L_sti + lambda3 * adv_loss, total generator loss
-            uir_loss = uir_l_loss + uir_u_loss
-            total_vae_loss = uir_loss + sti_loss + adv_loss
+                labeled_imgs = labeled_imgs.to(device)      # send data to training device
+                labels = labels.to(device)
+                unlabeled_imgs = unlabeled_imgs.to(device)
 
-            optim_generator.zero_grad()
-            total_vae_loss.backward()
-            optim_generator.step()
-
-
-            # Train Discriminator
-            with torch.no_grad():
-                _, _, _, mu_l, _ = generator.forward(labeled_imgs)
-                _, _, _, mu_u, _ = generator.forward(unlabeled_imgs)
-
-                # Get uncertainty score
-                pred_l_oui, _ = resnet(unlabeled_imgs)                # pred_oui is prediction, need to map to 0~1
-                pred_l_oui = F.softmax(pred_l_oui, dim=1)
-                uncertainty = getUncertainty(pred_l_oui, ClassNum)            # TODO: check uncertainty values
-                uncertainty = torch.reshape(uncertainty, [uncertainty.size(0), 1])
-                # uncertainty = uncertainty.cpu()
-
-            labeled_preds = discriminator(mu_l)
-            unlabeled_preds = discriminator(mu_u)
-
-            lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
-            unlab_fake_preds = torch.ones(unlabeled_imgs.size(0), 1)       # relate to uncertainty here, -E[log(uncertainty - D(q_phi(z_u|x_u)) )]
-            unlab_fake_preds = unlab_fake_preds.to(device)
-            lab_real_preds = lab_real_preds.to(device)
-
-            unlab_fake_preds = unlab_fake_preds - uncertainty               # TODO: check if this is correct
-
-            dsc_loss = discriminator_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_fake_preds)
-
-            optim_discriminator.zero_grad()
-            dsc_loss.backward()
-            optim_discriminator.step()
+                # Train ResNet
+                optim_resNet.zero_grad()
+                pred_resnet, _ = resnet(labeled_imgs)
+                resnet_loss = OUI_loss(pred_resnet, labels)          # cross entropy loss
+                resnet_loss.backward()
+                optim_resNet.step()
 
 
-        # Relabeling each epoch
+                # VAE step, train UIR and STI (Generator)
+                y_l, recon_l, z_l, mu_l, logvar_l = generator.forward(labeled_imgs)    # labeled data flow
+                uir_l_loss = UIR_loss(mu_l, logvar_l, recon_l, labeled_imgs)
+                sti_loss = STI_loss(mu_l, logvar_l, y_l, labels)                       # labeled data provide loss for sti
+
+                _, recon_u, z_u, mu_u, logvar_u = generator.forward(unlabeled_imgs)    # unlabeled data flow
+                uir_u_loss = UIR_loss(mu_u, logvar_u, recon_u, unlabeled_imgs)
+
+                labeled_preds = discriminator(mu_l)             # mu computer from z, discriminator learn from latent space
+                unlabeled_preds = discriminator(mu_u)
+
+                # labeled is 1, unlabeled is 0
+                lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
+                unlab_real_preds = torch.ones(unlabeled_imgs.size(0), 1)    # -E[log( D(q_phi(z_u|x_u)) )]
+                lab_real_preds = lab_real_preds.to(device)
+                unlab_real_preds = unlab_real_preds.to(device)
+
+                adv_loss = adversary_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_real_preds)
+
+                # L_G = lambda1 * L_uir + lambda2 * L_sti + lambda3 * adv_loss, total generator loss
+                uir_loss = uir_l_loss + uir_u_loss
+                total_vae_loss = uir_loss + sti_loss + adv_loss
+
+                optim_generator.zero_grad()
+                total_vae_loss.backward()
+                optim_generator.step()
+
+
+                # Train Discriminator
+                with torch.no_grad():
+                    _, _, _, mu_l, _ = generator.forward(labeled_imgs)
+                    _, _, _, mu_u, _ = generator.forward(unlabeled_imgs)
+
+                    # Get uncertainty score
+                    pred_l_oui, _ = resnet(unlabeled_imgs)                # pred_oui is prediction, need to map to 0~1
+                    pred_l_oui = F.softmax(pred_l_oui, dim=1)
+                    uncertainty = getUncertainty(pred_l_oui, ClassNum)            # TODO: check uncertainty values
+                    uncertainty = torch.reshape(uncertainty, [uncertainty.size(0), 1])
+
+                labeled_preds = discriminator(mu_l)
+                unlabeled_preds = discriminator(mu_u)
+
+                lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
+                unlab_fake_preds = torch.ones(unlabeled_imgs.size(0), 1)       # relate to uncertainty here, -E[log(uncertainty - D(q_phi(z_u|x_u)) )]
+                unlab_fake_preds = unlab_fake_preds.to(device)
+                lab_real_preds = lab_real_preds.to(device)
+
+                unlab_fake_preds = unlab_fake_preds - uncertainty               # TODO: check if this is correct
+
+                dsc_loss = discriminator_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_fake_preds)
+
+                optim_discriminator.zero_grad()
+                dsc_loss.backward()
+                optim_discriminator.step()
+
+                # update ResNet scheduler
+                sched_resNet.step()
+
+        # Relabeling each active learning cycles
         if len(labeled_indices) <= MaxLabelSize:               # labeled set increase to 40% full dataset
             print("\n")
             print("Relabeling")
             all_preds = []
             all_indices = []
 
-            for iter_count in tqdm(range(train_iterations)):
-                imgs, indices = next(unlabeled_data)
+            for data in unlabeled_dataloader:
+                imgs, _, indices = data
                 imgs = imgs.to(device)
                 # stop tracking gradient, get discriminator prediction
                 with torch.no_grad():

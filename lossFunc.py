@@ -30,7 +30,7 @@ def STI_loss(mu, logVar, pred, labels):
 def UIR_loss(mu, logVar, recons, imgs):
     # Apply twice for labeled and unlabeled data
     kl_div = 0.5 * torch.sum(-1 - logVar + mu.pow(2) + logVar.exp())
-    loss = F.mse_loss(recons, imgs, size_average=False) + kl_div
+    loss = F.mse_loss(recons, imgs, reduction='sum') + kl_div
 
     return loss
 
