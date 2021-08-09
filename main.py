@@ -148,16 +148,16 @@ if __name__ == "__main__":
     DataPath = "./data"                             # dataset directory
     OutPath = "./results"                           # output log directory
     BatchSize = 128                                 # batch size for training and testing
-    ImgNum = 50000                               # CIFAR10 training set has 50000 samples in total
-    Cycles = 10                                   # active learning cycles
-    Epochs = 100                                  # ResNet training epochs (original: 100)
+    ImgNum = 50000                                  # CIFAR10 training set has 50000 samples in total
+    Cycles = 4                                      # active learning cycles
+    Epochs = 100                                    # ResNet training epochs (original: 100)
     ZDim = 32                                       # VAE latent dimension
     Beta = 1                                        # VAE hyperparameter
-    M = ImgNum * 0.1                             # initial labeled set size (original: 10%)
+    M = 5000                                        # initial labeled set size (original: 10%)
     ClassNum = 10                                   # CIFAR10: 10; CIFAR100: 100
-    RelabelNum = ImgNum * 0.9 * 0.05             # number of samples to relabel each epoch (original: 5% of the unlabeled set, dynamically)
+    RelabelNum = 5000                            # number of samples to relabel each AL cycle (original: 5% of the unlabeled set, dynamically)
     MaxLabelSize = 0.4 * ImgNum                  # maximum label set size available
-    RandomInit = True                            # initial label set sampling method, if False, use UIR to initialize
+    RandomInit = False                            # initial label set sampling method, if False, use UIR to initialize
     I = 10                                       # for labele set initialization using UIR, I << M
 
     # ResNet Parameters
@@ -230,7 +230,7 @@ if __name__ == "__main__":
         # Network training epoch
         for epoch in range(Epochs):
             print("\n")
-            print("AL cycles: " + str(cycles) + " / " + str(Cycles)
+            print("AL cycles: " + str(cycles + 1) + " / " + str(Cycles)
                   + " Epoch: " + str(epoch) + " / " + str(Epochs))
 
             # set ResNet in train mode
@@ -261,8 +261,8 @@ if __name__ == "__main__":
                 _, recon_u, z_u, mu_u, logvar_u = generator.forward(unlabeled_imgs)    # unlabeled data flow
                 uir_u_loss = UIR_loss(mu_u, logvar_u, recon_u, unlabeled_imgs)
 
-                labeled_preds = discriminator(mu_l)             # mu computer from z, discriminator learn from latent space
-                unlabeled_preds = discriminator(mu_u)
+                labeled_preds = discriminator(mu_l.detach())             # mu computer from z, discriminator learn from latent space
+                unlabeled_preds = discriminator(mu_u.detach())           # TODO: check whether mu need gradient
 
                 # labeled is 1, unlabeled is 0
                 lab_real_preds = torch.ones(labeled_imgs.size(0), 1)
@@ -283,15 +283,14 @@ if __name__ == "__main__":
 
                 # Train Discriminator
                 with torch.no_grad():
-                    _, _, _, mu_l, _ = generator.forward(labeled_imgs)
-                    _, _, _, mu_u, _ = generator.forward(unlabeled_imgs)
-
                     # Get uncertainty score
                     pred_l_oui, _ = resnet(unlabeled_imgs)                # pred_oui is prediction, need to map to 0~1
                     pred_l_oui = F.softmax(pred_l_oui, dim=1)
-                    uncertainty = getUncertainty(pred_l_oui, ClassNum)            # TODO: check uncertainty values
+                    uncertainty = getUncertainty(pred_l_oui, ClassNum)
                     uncertainty = torch.reshape(uncertainty, [uncertainty.size(0), 1])
 
+                mu_l = mu_l.detach()
+                mu_u = mu_u.detach()
                 labeled_preds = discriminator(mu_l)
                 unlabeled_preds = discriminator(mu_u)
 
@@ -300,7 +299,7 @@ if __name__ == "__main__":
                 unlab_fake_preds = unlab_fake_preds.to(device)
                 lab_real_preds = lab_real_preds.to(device)
 
-                unlab_fake_preds = unlab_fake_preds - uncertainty               # TODO: check if this is correct
+                unlab_fake_preds = unlab_fake_preds - uncertainty
 
                 dsc_loss = discriminator_loss(labeled_preds, unlabeled_preds, lab_real_preds, unlab_fake_preds)
 
@@ -311,6 +310,35 @@ if __name__ == "__main__":
                 # update ResNet scheduler
                 sched_resNet.step()
 
+
+
+            # Test target model (OUI)
+            correct = 0
+            total = 0
+            # Stop tracking gradient
+            resnet.eval()
+            with torch.no_grad():
+                for test_sample in test_loader:
+                    test_inputs, test_labels = test_sample
+                    test_inputs = test_inputs.to(device)
+                    test_labels = test_labels.to(device)
+
+                    pred_test, _ = resnet.forward(test_inputs)
+
+                    _, predicted = torch.max(pred_test.data, 1)
+                    total += test_labels.size(0)
+                    correct += (predicted == test_labels).sum().item()
+
+            test_accuracy.append(correct / total)
+            print("\n")
+            print("Current labeled set size: " + str(len(labeled_indices)) +
+                  " Unlabeled set size: " + str(len(unlabeled_indices)))
+            print("Accuracy of the network on the 10000 test images: %d %%" % (
+                    100 * correct / total))
+            print("\n")
+
+
+
         # Relabeling each active learning cycles
         if len(labeled_indices) <= MaxLabelSize:               # labeled set increase to 40% full dataset
             print("\n")
@@ -318,8 +346,8 @@ if __name__ == "__main__":
             all_preds = []
             all_indices = []
 
-            for data in unlabeled_dataloader:
-                imgs, _, indices = data
+            for unlabeled_data in unlabeled_dataloader:
+                imgs, _, indices = unlabeled_data
                 imgs = imgs.to(device)
                 # stop tracking gradient, get discriminator prediction
                 with torch.no_grad():
@@ -341,35 +369,6 @@ if __name__ == "__main__":
 
             labeled_indices = list(labeled_indices) + list(relabel_indices)
             unlabeled_indices = np.setdiff1d(list(all_indices), labeled_indices)
-
-            # Update number of images to relabel
-            RelabelNum = len(unlabeled_indices) * 0.05
-
-
-        # Test target model (OUI)
-        correct = 0
-        total = 0
-        # Stop tracking gradient
-        resnet.eval()
-        with torch.no_grad():
-            for test_sample in test_loader:
-                test_inputs, test_labels = test_sample
-                test_inputs = test_inputs.to(device)
-                test_labels = test_labels.to(device)
-
-                pred_test,_ = resnet.forward(test_inputs)
-
-                _, predicted = torch.max(pred_test.data, 1)
-                total += test_labels.size(0)
-                correct += (predicted == test_labels).sum().item()
-
-        test_accuracy.append(correct / total)
-        print("Current labeled set size: " + str(len(labeled_indices)) +
-              " Unlabeled set size: " + str(len(unlabeled_indices)))
-        print("Accuracy of the network on the 10000 test images: %d %%" % (
-                100 * correct / total))
-        print("\n")
-
 
 
     # # Save model

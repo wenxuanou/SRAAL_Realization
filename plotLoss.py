@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 # ouiLossPath = "results/oui_train_loss.out"
 # generatorLossPath = "results/generator_train_loss.out"
 # discriminatorLossPath = "results/discriminator_train_loss.out"
-testAccPath = "results/test_accuracy.out"
+testAccPath = "results/test_accuracy_randomInit_100epochPerCycle_max83%.out"
 
 resnetAccPath = "results/resnet_test_accuracy.out"
 
