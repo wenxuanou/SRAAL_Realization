@@ -1,26 +1,5 @@
 import torch
 
-
-def testModel(models, dataloaders, mode='val'):
-    # test task model
-    assert mode == 'val' or mode == 'test'
-    models.eval()
-
-    total = 0
-    correct = 0
-    with torch.no_grad():
-        for (inputs, labels) in dataloaders[mode]:
-            inputs = inputs.cuda()
-            labels = labels.cuda()
-
-            scores, _ = models(inputs)
-            _, preds = torch.max(scores.data, 1)
-            total += labels.size(0)
-            correct += (preds == labels).sum().item()
-
-    return 100 * correct / total
-
-
 def getUncertainty(V, classNum):
     # For classification, input V is the possibility vector for each category
     # Get uncertainty from OUI (task model)
