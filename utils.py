@@ -26,13 +26,10 @@ def getUncertainty(V, classNum):
     # Get uncertainty from OUI (task model)
     # Only compute uncertainty of unlabeled data
 
-    # TODO: check size of V
     # V: dataNum * classNum
-
     maxV = torch.amax(V, axis=1)       # max of each category
     varV = torch.var(V, axis=1, unbiased=False)        # variance of each data point
 
-    # TODO: fix negative uncertainty problem
     C = classNum
     C_inv = 1 / C
 
@@ -44,10 +41,4 @@ def getUncertainty(V, classNum):
     uncertainty_temp2 = torch.multiply(uncertainty_temp1, maxV)
     uncertainty = 1 - uncertainty_temp2
 
-    # minVarV = torch.amin(varV)
-    # uncertainty = torch.divide(minVarV, varV)
-    # uncertainty = torch.multiply(uncertainty, maxV)         # TODO: figure out the size of uncertainty
-    # uncertainty = 1 - uncertainty
-
-    # TODO: check uncertainty score should between 0 and 1, size: dataNum * 1
     return uncertainty  # return the overall uncertainty of every unlabeled data point

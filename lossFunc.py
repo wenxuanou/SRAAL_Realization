@@ -1,12 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# import torch.backends.cudnn as cudnn
-# import torch.optim as optim
-#
-# import numpy as np
 
-def OUI_loss(output, labels):
+def Resnet_loss(output, labels):
     # Task model loss
     criterion = nn.CrossEntropyLoss(reduction='none')
     loss = criterion(output, labels)
