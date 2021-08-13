@@ -89,7 +89,7 @@ if __name__=="__main__":
     OutPath = "./results"               # output log directory
     BatchSize = 128                     # batch size for training and testing
     ImgNum = 50000                      # CIFAR10 training set has 50000 samples in total
-    Epochs = 50                         # training epochs (original: 100)
+    Epochs = 50                         # training epochs 
     M = ImgNum * 0.4                    # train set size (original: 100%)
     ClassNum = 10                       # CIFAR10: 10; CIFAR100: 100
     # ResNet Parameters
