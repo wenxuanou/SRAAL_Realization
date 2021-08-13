@@ -13,7 +13,7 @@ def getUncertainty(V, classNum):
     C_inv = 1 / C
 
     temp1 = torch.pow(C_inv - maxV,2)
-    temp2 = (C - 1) * torch.pow(C_inv - (1 - maxV) / (C - 1), 2)
+    temp2 = (C - 1) * torch.pow(C_inv - (1 - maxV) / (C - 1), 2)     ##
     minVarV = C_inv * (temp1 + temp2)
 
     uncertainty_temp1 = torch.divide(minVarV, varV)
